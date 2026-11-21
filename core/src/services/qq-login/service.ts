@@ -42,6 +42,10 @@ function apiUrl(endpoint: string, path: string): string {
 
 function napCatErrorMessage(data: any): string {
     const errorCode = String(data?.code || '').trim().toUpperCase();
+    if (/^QRCode Get Error$/i.test(String(data?.error || '').trim()))
+        return 'QQ 扫码服务未生成二维码，请稍后刷新';
+    if (/\b(?:timeout|timed out)\b/i.test(String(data?.error || '')))
+        return 'QQ 扫码服务响应超时，请稍后重试';
     switch (errorCode) {
         case 'SIGNATURE_REQUIRED':
             return 'NapCat 接口签名缺失，请检查配置';
@@ -53,6 +57,8 @@ function napCatErrorMessage(data: any): string {
             return 'QQ 登录尚未确认，请先完成扫码确认';
         case 'LOGOUT_REQUIRED':
             return '上一位 QQ 登录尚未注销，请稍后重试';
+        case 'LOGOUT_FAILED':
+            return 'QQ 登录任务注销失败，请稍后重试';
         case 'TASK_EXPIRED':
             return 'QQ 登录任务已过期，请重新获取二维码';
         default:
@@ -68,8 +74,6 @@ function normalizeTask(raw: any): QqLoginTask {
     const expiresAt = Number(task.expiresAt);
     if (!taskId)
         throw new Error('NapCat 返回的登录任务无效');
-    if (!qrImage)
-        throw new Error('NapCat 未返回登录二维码');
     return {
         taskId,
         status,
@@ -105,17 +109,23 @@ async function requestNapCat(path: string, body: Record<string, unknown>, requir
 }
 
 async function createLoginTask(): Promise<QqLoginTask> {
-    return normalizeTask(await requestNapCat('/api/qq/login/qrcode', {}));
+    const task = normalizeTask(await requestNapCat('/api/qq/login/qrcode', {}));
+    if (!task.qrImage)
+        throw new Error('NapCat 未返回新的登录二维码');
+    return task;
 }
 
 async function queryLoginStatus(taskId: string): Promise<QqLoginTask> {
     const id = String(taskId || '').trim();
     if (!id)
         throw new Error('登录任务 ID 不能为空');
-    return normalizeTask(await requestNapCat('/api/qq/login/status', {
+    const data = await requestNapCat('/api/qq/login/status', {
         taskId: id,
         refresh: false,
-    }));
+    }, false);
+    if (data?.ok !== true && !['cancelled', 'expired', 'failed'].includes(data?.task?.status))
+        throw new Error(napCatErrorMessage(data));
+    return normalizeTask(data);
 }
 
 async function getMiniappCode(taskId: string): Promise<QqMiniappLoginResult> {
@@ -137,9 +147,11 @@ async function cancelLoginTask(taskId: string): Promise<void> {
     const id = String(taskId || '').trim();
     if (!id)
         throw new Error('登录任务 ID 不能为空');
-    await requestNapCat('/api/qq/logout', {
+    const data = await requestNapCat('/api/qq/logout', {
         taskId: id,
     }, false);
+    if (data?.ok !== true && data?.code !== 'TASK_EXPIRED')
+        throw new Error(napCatErrorMessage(data));
 }
 
 export {

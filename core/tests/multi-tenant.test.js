@@ -54,6 +54,38 @@ function loadCodeStore(dir, users = loadUserStore(dir)) {
     });
 }
 
+test('QQ 二维码请求断开后释放晚到的任务，随后可以再次取码', async () => {
+    let complete;
+    const cancelled = [];
+    const service = {
+        createLoginTask: () => new Promise(resolve => { complete = resolve; }),
+        cancelLoginTask: async id => { cancelled.push(id); },
+    };
+    const { mountQqLoginRoutes } = load('controllers/admin/qq-login-routes.js', {
+        '../../services/qq-login/service': service,
+        './middleware': { resolveAuthContext: () => ({ auth: {} }) },
+    });
+    const routes = new Map();
+    mountQqLoginRoutes({ post: (path, handler) => routes.set(path, handler) }, {});
+    const create = routes.get('/api/qq-login/tasks');
+    const req = { adminToken: 'test-session' };
+    const disconnected = { destroyed: false, json: () => assert.fail('disconnected response must not receive a QR') };
+    const first = create(req, disconnected);
+    disconnected.destroyed = true;
+    complete({ taskId: 'first', expiresAt: Date.now() + 120_000 });
+    await first;
+    assert.deepEqual(cancelled, ['first']);
+
+    let payload;
+    const second = create(req, { json: value => { payload = value; } });
+    complete({ taskId: 'second', expiresAt: Date.now() + 120_000 });
+    await second;
+    assert.equal(payload.data.task_id, 'second');
+    const cancel = routes.get('/api/qq-login/tasks/:taskId/cancel');
+    await cancel({ ...req, params: { taskId: 'second' } }, { json: () => {} });
+    assert.deepEqual(cancelled, ['first', 'second']);
+});
+
 test('首次启动为 owner 生成私有的初始密码', () => {
     const dir = tempDir();
     const users = loadUserStore(dir);

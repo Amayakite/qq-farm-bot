@@ -49,7 +49,13 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
         const token = (req as any).adminToken;
         try {
             const task = await createLoginTask();
-            if (!resolveAuthContext(ctx, token).auth) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+            const { error } = resolveAuthContext(ctx, token);
+            if (res.destroyed || error) {
+                // No client can receive the task ID and cancel it later.
+                await cancelLoginTask(task.taskId).catch(() => undefined);
+                if (!res.destroyed && error) res.status(error.status).json(error.body);
+                return;
+            }
             const expiresAtMs = task.expiresAt < 1e12 ? task.expiresAt * 1000 : task.expiresAt;
             const ttl = expiresAtMs > Date.now() ? Math.min(expiresAtMs - Date.now(), TASK_TTL_MS) : TASK_TTL_MS;
             const timer = setTimeout(() => forgetTask(task.taskId), ttl);
@@ -58,7 +64,7 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
             res.json({ ok: true, data: publicTask(task) });
         }
         catch (error: any) {
-            sendError(res, error, 'QQ 登录任务创建失败');
+            if (!res.destroyed) sendError(res, error, 'QQ 登录任务创建失败');
         }
         finally {
             creating = false;

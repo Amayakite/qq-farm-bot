@@ -16,6 +16,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits(['close', 'saved'])
+const QQ_LOGIN_REQUEST_TIMEOUT_MS = 125_000
 
 const loading = ref(false)
 const errorMessage = ref('')
@@ -50,6 +51,8 @@ let qqFlowVersion = 0
 let qqPollController: AbortController | undefined
 let qqPollInFlight: Promise<void> | undefined
 let qqPollKey = ''
+let qqCreateRequest = Promise.resolve()
+let qqCancelRequest = Promise.resolve()
 let qqPendingCode = ''
 let qrNameSubmitTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -400,7 +403,7 @@ function resetQqLogin() {
   qqFlowVersion += 1
   stopQqPolling()
   if (taskId)
-    void cancelQqLoginTask(taskId)
+    qqCancelRequest = cancelQqLoginTask(taskId)
   qqTaskId.value = ''
   qqStatus.value = ''
   qqError.value = ''
@@ -427,7 +430,7 @@ async function getQqCodeAndAdd(taskId: string, flowVersion: number) {
   qqLoading.value = true
   qqStatus.value = '正在获取小程序授权 Code...'
   try {
-    const response = await api.post(`/api/qq-login/tasks/${taskId}/code`, undefined, { timeout: 120000 } as any)
+    const response = await api.post(`/api/qq-login/tasks/${taskId}/code`, undefined, { timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS })
     if (!isQqFlowActive(taskId, flowVersion))
       return
     const payload = ensureQqApiOk(response, '获取小程序授权 Code 失败')
@@ -452,7 +455,7 @@ async function cancelQqLoginTask(taskId: string) {
     return
   try {
     const response = await api.post(`/api/qq-login/tasks/${taskId}/cancel`, undefined, {
-      timeout: 120000,
+      timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS,
       skipErrorToast: true,
     } as any)
     ensureQqApiOk(response, 'QQ 登录任务取消失败')
@@ -468,7 +471,7 @@ async function pollQqLoginRequest(taskId: string, flowVersion: number) {
   qqPollController = controller
   try {
     const response = await api.post(`/api/qq-login/tasks/${taskId}/status`, undefined, {
-      timeout: 120000,
+      timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS,
       signal: controller.signal,
       skipErrorToast: true,
     } as any)
@@ -496,6 +499,9 @@ async function pollQqLoginRequest(taskId: string, flowVersion: number) {
       return
     }
     else if (['cancelled', 'expired', 'failed'].includes(status)) {
+      qqTaskId.value = ''
+      qqQrUrl.value = ''
+      qqStatus.value = ''
       qqError.value = '二维码已失效，请重新获取'
       return
     }
@@ -544,37 +550,55 @@ async function pollQqLogin(taskId: string, flowVersion: number) {
   }
 }
 
-async function startQqLogin() {
-  if (!qqQrLoginEnabled.value) {
-    activeLoginTab.value = 'code'
-    return
-  }
-  resetQqLogin()
-  const flowVersion = qqFlowVersion
-  qqLoading.value = true
+async function requestQqLogin(flowVersion: number) {
   try {
-    const response = await api.post('/api/qq-login/tasks')
+    await qqCancelRequest
+    if (flowVersion !== qqFlowVersion)
+      return
+    const response = await api.post('/api/qq-login/tasks', undefined, {
+      timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS,
+      skipErrorToast: true,
+    } as any)
     const payload = ensureQqApiOk(response, 'QQ 登录二维码获取失败')
     const task = payload?.data
     const taskId = String(task?.task_id || '')
     const qrImage = String(task?.qr_image || '')
+    if (flowVersion !== qqFlowVersion) {
+      if (taskId)
+        await cancelQqLoginTask(taskId)
+      return
+    }
     if (!taskId || !qrImage)
       throw new Error('未创建 QQ 登录任务')
-    if (flowVersion !== qqFlowVersion)
-      return
     qqTaskId.value = taskId
     qqQrUrl.value = qrImage
     qqStatus.value = '等待 QQ 扫码'
     void pollQqLogin(taskId, flowVersion)
   }
   catch (error: any) {
-    if (flowVersion === qqFlowVersion)
-      qqError.value = getApiErrorMessage(error, 'QQ 登录二维码获取失败')
+    if (flowVersion === qqFlowVersion) {
+      qqError.value = error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT'
+        ? '获取 QQ 登录二维码超时，请稍后刷新二维码'
+        : getApiErrorMessage(error, 'QQ 登录二维码获取失败')
+    }
   }
   finally {
     if (flowVersion === qqFlowVersion)
       qqLoading.value = false
   }
+}
+
+function startQqLogin() {
+  if (!qqQrLoginEnabled.value) {
+    activeLoginTab.value = 'code'
+    return
+  }
+  if (qqLoading.value)
+    return
+  resetQqLogin()
+  const flowVersion = qqFlowVersion
+  qqLoading.value = true
+  qqCreateRequest = qqCreateRequest.then(() => requestQqLogin(flowVersion))
 }
 
 function close() {
