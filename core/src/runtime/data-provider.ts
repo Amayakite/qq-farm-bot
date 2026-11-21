@@ -1,3 +1,4 @@
+import { requiresNewCode } from '../types/account';
 export {};
 const { findAccountByRef, normalizeAccountRef, resolveAccountId: resolveAccountIdByList } = require('../services/account-resolver');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
@@ -20,6 +21,11 @@ interface DataProviderOptions {
     startWorker: (account: any) => boolean;
     stopWorker: (accountId: string) => void;
     restartWorker: (account: any) => void;
+    canRunAccount?: (account: any) => boolean;
+    isRecoveryQueued?: (id: string) => boolean;
+    cancelRecovery?: (id: string) => void;
+    recoverTenantAccounts?: (ownerId: string) => void;
+    onRunStateChanged?: (id: string) => void;
 }
 
 function createDataProvider(options: DataProviderOptions) {
@@ -41,6 +47,11 @@ function createDataProvider(options: DataProviderOptions) {
         startWorker,
         stopWorker,
         restartWorker,
+        canRunAccount,
+        isRecoveryQueued,
+        cancelRecovery,
+        recoverTenantAccounts,
+        onRunStateChanged,
     } = options;
 
     function getStoredAccountsList(): any[] {
@@ -51,27 +62,75 @@ function createDataProvider(options: DataProviderOptions) {
     function resolveAccountRefId(accountRef: string): string {
         const raw = normalizeAccountRef(accountRef);
         if (!raw) return '';
-        const resolved = resolveAccountIdByList(getStoredAccountsList(), raw);
+        const resolved = typeof store.findAccountByRef === 'function' ? store.findAccountByRef(raw)?.id : resolveAccountIdByList(getStoredAccountsList(), raw);
         return resolved || raw;
     }
 
     function findAccountByAnyRef(accountRef: string): any {
-        return findAccountByRef(getStoredAccountsList(), accountRef);
+        return typeof store.findAccountByRef === 'function' ? store.findAccountByRef(accountRef) : findAccountByRef(getStoredAccountsList(), accountRef);
+    }
+
+    function getStoredAccount(id: string): any {
+        return typeof store.getAccountById === 'function' ? store.getAccountById(id) : getStoredAccountsList().find(account => account.id === id);
+    }
+
+    function getHosting(id: string, account: any) {
+        const worker = workers[id];
+        const workerActive = worker && !worker.stopping;
+        const issue = account?.lastRunIssue || null;
+        const needsCode = account && (!account.code || requiresNewCode(issue) || (account.codeConsumed && !workerActive));
+        const phase = !account || !account.runEnabled ? 'stopped'
+            : canRunAccount && !canRunAccount(account) ? 'suspended'
+            : needsCode ? 'relogin_required'
+            : workerActive ? (worker.status?.connection?.connected ? 'online' : 'connecting')
+            : isRecoveryQueued?.(id) ? 'queued' : 'offline';
+        return { phase, runEnabled: account?.runEnabled === true, needsCode: !!needsCode, issue };
+    }
+
+    function accountPanelView(account: any) {
+        const worker = workers[account.id];
+        const profile = worker?.status?.status;
+        return {
+            ...account,
+            running: !!worker && !worker.stopping,
+            nick: profile?.name || account.nick,
+            avatar: profile?.avatarUrl || account.avatar,
+            hosting: getHosting(account.id, account),
+        };
+    }
+
+    function ensureCanRequestStart(account: any): void {
+        if (canRunAccount && !canRunAccount(account)) throw Object.assign(new Error('所属租户已停用或到期'), { code: 'tenant_unavailable' });
+        if (!account.code || account.codeConsumed || requiresNewCode(account.lastRunIssue)) {
+            throw Object.assign(new Error('请使用新的游戏登录 Code 或重新扫码'), { code: 'relogin_required' });
+        }
     }
 
     return {
         resolveAccountId: (accountRef: string) => resolveAccountRefId(accountRef),
+        resolveAccountAccess: (accountRef: string) => {
+            const account = findAccountByAnyRef(accountRef);
+            return account ? { id: account.id, ownerId: account.ownerId } : null;
+        },
+        getAccountOwnerId: (id: string) => getStoredAccount(id)?.ownerId || '',
+        getAccountHosting: (id: string) => getHosting(id, getStoredAccount(id)),
+        getAccountsByOwner: (id: string) => {
+            const accounts = typeof store.getAccountsByOwner === 'function' ? store.getAccountsByOwner(id)
+                : getStoredAccountsList().filter(account => String(account.ownerId || 'owner') === id);
+            return accounts.map(accountPanelView);
+        },
+        recoverTenantAccounts,
 
         getStatus: (accountRef: string) => {
             const accountId = resolveAccountRefId(accountRef);
-            if (!accountId) return buildDefaultStatus('');
             const w = workers[accountId];
-            if (!w || !w.status) return buildDefaultStatus(accountId);
-            return {
+            const result = {
                 ...buildDefaultStatus(accountId),
-                ...normalizeStatusForPanel(w.status, accountId, w.name),
-                wsError: w.wsError || null,
+                ...(w?.status && !w.stopping ? normalizeStatusForPanel(w.status, accountId, w.name) : {}),
+                wsError: w?.wsError || null,
+                hosting: getHosting(accountId, getStoredAccount(accountId)),
             };
+            return result;
         },
 
         getLogs: (accountRef: string, optionsOrLimit?: any) => {
@@ -85,6 +144,13 @@ function createDataProvider(options: DataProviderOptions) {
             if (!accountId) return [];
             const accId = String(accountId || '');
             return filterLogs(globalLogs.filter(l => String(l.accountId || '') === accId), opts).slice(-max);
+        },
+
+        getLogsForAccounts: (ids: string[], options: any) => {
+            const allowed = new Set(ids);
+            return filterLogs(globalLogs.filter(entry => allowed.has(String(entry.accountId || ''))), options)
+                .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+                .slice(0, Math.max(1, Number(options?.limit) || 100));
         },
 
         getAccountLogs: (limit: number) => accountLogs.slice(-limit).reverse(),
@@ -427,39 +493,41 @@ function createDataProvider(options: DataProviderOptions) {
 
         getAccounts: () => {
             const data = getAccounts();
-            data.accounts.forEach((a: any) => {
-                const worker = workers[a.id];
-                a.running = !!worker;
-                if (worker && worker.status && worker.status.status && worker.status.status.name) {
-                    a.nick = worker.status.status.name;
-                }
-                if (worker && worker.status && worker.status.status && worker.status.status.avatarUrl) {
-                    a.avatar = worker.status.status.avatarUrl;
-                }
-            });
-            return data;
+            return { ...data, accounts: data.accounts.map(accountPanelView) };
         },
 
         startAccount: (accountRef: string) => {
-            const accountId = resolveAccountRefId(accountRef);
-            const acc = findAccountByAnyRef(accountId || accountRef);
+            const acc = findAccountByAnyRef(accountRef);
             if (!acc) return false;
-            return startWorker(acc) || !!(workers[accountId] && !workers[accountId].stopping);
+            const worker = workers[acc.id];
+            if (worker && !worker.stopping && acc.runEnabled && (!canRunAccount || canRunAccount(acc))) return true;
+            ensureCanRequestStart(acc);
+            const account = store.setAccountRunState(acc.id, { runEnabled: true });
+            cancelRecovery?.(acc.id);
+            if (worker?.stopping) {
+                restartWorker(account);
+                return true;
+            }
+            return !!worker || startWorker(account);
         },
 
-        stopAccount: (accountRef: string) => {
-            const accountId = resolveAccountRefId(accountRef);
-            const acc = findAccountByAnyRef(accountId || accountRef);
+        stopAccount: (accountRef: string, options: { preserveIntent?: boolean } = {}) => {
+            const acc = findAccountByAnyRef(accountRef);
             if (!acc) return false;
-            if (accountId) stopWorker(accountId);
+            if (!options.preserveIntent) store.setAccountRunState(acc.id, { runEnabled: false });
+            cancelRecovery?.(acc.id);
+            stopWorker(acc.id);
+            onRunStateChanged?.(acc.id);
             return true;
         },
 
         restartAccount: (accountRef: string) => {
-            const accountId = resolveAccountRefId(accountRef);
-            const acc = findAccountByAnyRef(accountId || accountRef);
+            const acc = findAccountByAnyRef(accountRef);
             if (!acc) return false;
-            restartWorker(acc);
+            ensureCanRequestStart(acc);
+            cancelRecovery?.(acc.id);
+            restartWorker(store.setAccountRunState(acc.id, { runEnabled: true }));
+            onRunStateChanged?.(acc.id);
             return true;
         },
 

@@ -28,6 +28,8 @@ interface UserRecord {
 }
 
 let users: UserRecord[] | null = null;
+let usersById = new Map<string, UserRecord>();
+let usersByUsername = new Map<string, UserRecord>();
 interface Redemption { redeemedAt: number; redeemedBy: string }
 let redemptions: Record<string, Redemption> = {};
 
@@ -100,6 +102,12 @@ function setInitialPassword(owner: UserRecord): void {
 function saveUsers(next: UserRecord[], receipts = redemptions): void {
     ensureDataDir();
     writeJsonFileAtomic(USERS_FILE, { users: next, redemptions: receipts }, 2, 0o600);
+    publishUsers(next, receipts);
+}
+
+function publishUsers(next: UserRecord[], receipts: Record<string, Redemption>): void {
+    usersById = new Map(next.map(user => [user.id, user]));
+    usersByUsername = new Map(next.map(user => [usernameKey(user.username), user]));
     users = next;
     redemptions = receipts;
 }
@@ -130,8 +138,7 @@ function loadUsers(): UserRecord[] {
     } else if (raw === missing) {
         saveUsers(normalized, receipts);
     }
-    users = normalized;
-    redemptions = receipts;
+    publishUsers(normalized, receipts);
     return normalized;
 }
 
@@ -152,13 +159,15 @@ function saveUser(user: UserRecord, codeId?: string): void {
 function getUserById(id: unknown): UserRecord | null {
     const target = String(id || '');
     if (!target) return null;
-    return loadUsers().find(user => user.id === target) || null;
+    loadUsers();
+    return usersById.get(target) || null;
 }
 
 function findUserByUsername(username: unknown): UserRecord | null {
     const key = usernameKey(username);
     if (!key) return null;
-    return loadUsers().find(user => usernameKey(user.username) === key) || null;
+    loadUsers();
+    return usersByUsername.get(key) || null;
 }
 
 function publicUser(user: UserRecord): any {

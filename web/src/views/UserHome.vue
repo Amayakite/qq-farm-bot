@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { Account, HostingStatus } from '@/stores/account'
+import { useNow } from '@vueuse/core'
 import { NCard } from 'naive-ui/es/card'
 import { NModal } from 'naive-ui/es/modal'
 import { storeToRefs } from 'pinia'
@@ -7,7 +9,7 @@ import { useRouter } from 'vue-router'
 import AccountModal from '@/components/AccountModal.vue'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
-import { useAccountStore } from '@/stores/account'
+import { hostingLabel, useAccountStore } from '@/stores/account'
 import { useFarmStore } from '@/stores/farm'
 import { useRanchStore } from '@/stores/ranch'
 import { useStatusStore } from '@/stores/status'
@@ -28,6 +30,7 @@ const { lands, summary } = storeToRefs(farmStore)
 const { state: ranchState, loading: ranchLoading } = storeToRefs(ranchStore)
 
 const showAccountModal = ref(false)
+const editingAccount = ref<Account | null>(null)
 const welcomeVisible = ref(false)
 const storageKey = (name: string) => `${name}:${userStore.userInfo?.id || 'guest'}`
 const checklistDismissed = ref(localStorage.getItem(storageKey('home_checklist_dismissed_v1')) === '1')
@@ -42,7 +45,30 @@ const confirmConfig = ref({
 })
 
 const hasAccount = computed(() => accounts.value.length > 0)
-const isRunning = computed(() => !!currentAccount.value?.running || currentAccountConnected.value)
+const now = useNow({ interval: 60_000 })
+const currentHosting = computed<HostingStatus | undefined>(() =>
+  (String(status.value?.accountId || '') === currentAccountId.value ? status.value?.hosting : undefined) || currentAccount.value?.hosting,
+)
+const currentPhase = computed<HostingStatus['phase']>(() =>
+  currentHosting.value?.phase || (currentAccountConnected.value ? 'online' : currentAccount.value?.running ? 'connecting' : 'stopped'),
+)
+const isRunning = computed(() => currentPhase.value === 'online' || currentPhase.value === 'connecting' || currentPhase.value === 'queued')
+const showStart = computed(() => hasAccount.value && currentPhase.value !== 'suspended' && !isRunning.value)
+const needsCode = computed(() => currentHosting.value?.needsCode || currentPhase.value === 'relogin_required')
+const issueLabels: Record<NonNullable<HostingStatus['issue']>['reason'], string> = {
+  login_required: '游戏拒绝了当前登录码，请扫码或输入新的 Code。',
+  kicked: '游戏账号被踢下线，请重新登录。',
+  session_lost: '游戏连接已断开，恢复托管需要新的登录 Code。',
+  disconnected: '上次连接游戏网关失败。',
+  worker_failed: '托管进程启动失败或异常退出。',
+}
+const lastIssue = computed(() => currentHosting.value?.issue)
+const expiresAt = computed(() => userStore.expiresAt)
+const remaining = computed(() => expiresAt.value ? expiresAt.value - now.value.getTime() : Number.POSITIVE_INFINITY)
+const showExpiry = computed(() => remaining.value <= 7 * 86_400_000)
+function formatTime(value: number) {
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
 const currentStatus = computed(() => String(status.value?.accountId || '') === currentAccountId.value ? status.value?.status : null)
 const accountName = computed(() => {
   return currentStatus.value?.name || currentAccount.value?.nick || currentAccount.value?.name || '我的农场'
@@ -100,7 +126,7 @@ const checklist = computed(() => [
     key: 'start',
     title: '启动自动托管',
     description: '账号在线后，收菜、浇水和好友巡查会自动进行',
-    done: hasAccount.value && isRunning.value,
+    done: hasAccount.value && currentPhase.value === 'online',
     action: 'start',
     actionLabel: '启动托管',
   },
@@ -177,11 +203,20 @@ function goRanch() {
 }
 
 function openAccountModal() {
+  editingAccount.value = null
+  showAccountModal.value = true
+}
+
+function reloginAccount() {
+  if (!currentAccount.value)
+    return
+  editingAccount.value = currentAccount.value
   showAccountModal.value = true
 }
 
 async function handleAccountSaved() {
   showAccountModal.value = false
+  editingAccount.value = null
   await accountStore.fetchAccounts()
   if (currentAccountId.value)
     await refreshCurrentAccount()
@@ -192,6 +227,8 @@ async function startAccount() {
     return openAccountModal()
   if (actionLoading.value)
     return
+  if (needsCode.value)
+    return reloginAccount()
   const id = String(currentAccount.value.id)
   actionLoading.value = true
   try {
@@ -200,7 +237,29 @@ async function startAccount() {
       toast.success('账号已启动，正在连接游戏')
   }
   catch (error: any) {
+    if (error?.response?.data?.errorType === 'relogin_required') {
+      await accountStore.fetchAccounts()
+      if (id === currentAccountId.value)
+        reloginAccount()
+      return
+    }
     toast.error(error?.message || '启动失败')
+  }
+  finally {
+    actionLoading.value = false
+  }
+}
+
+async function stopAccount() {
+  if (!currentAccountId.value || actionLoading.value)
+    return
+  actionLoading.value = true
+  try {
+    await accountStore.stopAccount(currentAccountId.value)
+    toast.success('已停止托管')
+  }
+  catch (error: any) {
+    toast.error(error?.message || '停止托管失败')
   }
   finally {
     actionLoading.value = false
@@ -285,7 +344,7 @@ watch(currentAccountId, () => {
   farmStore.resetLandState()
   ranchStore.reset()
 }, { immediate: true, flush: 'sync' })
-watch(currentAccountConnected, connected => {
+watch(currentAccountConnected, (connected) => {
   if (connected)
     void refreshCurrentAccount()
 }, { immediate: true })
@@ -309,8 +368,8 @@ onMounted(() => {
           </h1>
           <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
             <span class="hero-pill">{{ hasAccount ? accountName : '还没有添加游戏账号' }}</span>
-            <span class="hero-pill" :class="{ 'hero-pill--on': isRunning }">
-              {{ isRunning ? '自动托管运行中' : '托管未启动' }}
+            <span v-if="hasAccount" class="hero-pill" :class="{ 'hero-pill--on': currentPhase === 'online' }">
+              {{ hostingLabel(currentPhase) }}
             </span>
             <span v-if="realtimeConnected" class="hero-pill">实时连接正常</span>
           </div>
@@ -320,11 +379,28 @@ onMounted(() => {
             <span class="i-carbon-add" />
             添加账号
           </BaseButton>
-          <BaseButton v-if="hasAccount && !isRunning" variant="secondary" size="sm" :loading="actionLoading" @click="startAccount">
-            启动托管
+          <BaseButton v-if="showStart" variant="secondary" size="sm" :loading="actionLoading" @click="startAccount">
+            {{ needsCode ? '重新登录' : currentPhase === 'offline' ? '重试连接' : '启动托管' }}
+          </BaseButton>
+          <BaseButton v-if="currentHosting?.runEnabled" variant="ghost" size="sm" :loading="actionLoading" @click="stopAccount">
+            停止托管
           </BaseButton>
         </div>
       </div>
+    </section>
+
+    <section v-if="showExpiry && expiresAt" class="flex flex-wrap items-center justify-between gap-3 farm-card rounded-xl p-4" aria-label="租户有效期">
+      <div>
+        <div class="text-sm font-semibold">
+          {{ remaining <= 0 ? '使用期限已到期' : '使用期限即将到期' }}
+        </div>
+        <div class="mt-1 text-xs text-gray-500">
+          到期时间 {{ formatTime(expiresAt) }}
+        </div>
+      </div>
+      <BaseButton variant="secondary" size="sm" :to="remaining <= 0 ? '/renew?expired=1' : '/renew'">
+        使用续费码
+      </BaseButton>
     </section>
 
     <section v-if="showChecklist" class="farm-card rounded-2xl p-4 sm:p-5">
@@ -459,13 +535,18 @@ onMounted(() => {
                 {{ accountName }}
               </div>
               <div class="mt-0.5 text-xs text-gray-500">
-                Lv.{{ level }} · {{ isRunning ? '在线' : '离线' }}
+                <span v-if="level">Lv.{{ level }} · </span>{{ hostingLabel(currentPhase) }}
               </div>
             </div>
-            <BaseButton v-if="!isRunning" variant="secondary" size="sm" :loading="actionLoading" @click="startAccount">
-              启动
+            <BaseButton v-if="showStart" variant="secondary" size="sm" :loading="actionLoading" @click="startAccount">
+              {{ needsCode ? '重新登录' : currentPhase === 'offline' ? '重试' : '启动' }}
             </BaseButton>
           </div>
+          <p v-if="lastIssue || needsCode" class="mt-3 border rounded-lg px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
+            {{ lastIssue ? issueLabels[lastIssue.reason] : '当前没有可用的登录 Code，请重新扫码或输入新的 Code。' }}
+            <span v-if="needsCode && (lastIssue?.reason === 'disconnected' || lastIssue?.reason === 'worker_failed')"> 请更新登录 Code 后重试。</span>
+            <time v-if="lastIssue" class="block pt-1 text-gray-500">{{ formatTime(lastIssue.at) }}</time>
+          </p>
           <div class="grid grid-cols-2 mt-4 gap-2">
             <div class="stat-tile">
               <span class="stat-tile__label">金币</span>
@@ -505,7 +586,7 @@ onMounted(() => {
       </div>
     </section>
 
-    <AccountModal :show="showAccountModal" @close="showAccountModal = false" @saved="handleAccountSaved" />
+    <AccountModal :show="showAccountModal" :edit-data="editingAccount" @close="showAccountModal = false" @saved="handleAccountSaved" />
     <ConfirmModal
       :show="confirmConfig.show"
       :title="confirmConfig.title"

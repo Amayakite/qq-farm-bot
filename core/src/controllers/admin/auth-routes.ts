@@ -192,6 +192,7 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
         adminLogger.info('续费码兑换成功', { username, codeHint: record.codeHint, ip: clientIp, days: record.days });
 
         const refreshed = userStore.getUserById(credential.user.id);
+        if (userStore.isExpired(credential.user)) ctx.provider?.recoverTenantAccounts?.(credential.user.id);
         return issueLogin(ctx, res, refreshed);
     });
 

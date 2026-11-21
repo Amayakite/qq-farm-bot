@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { NDrawer, NDrawerContent } from 'naive-ui/es/drawer'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api, { getApiErrorMessage } from '@/api'
+import AdminAudit from '@/components/admin/AdminAudit.vue'
 import AdminCodes from '@/components/admin/AdminCodes.vue'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
+import BaseSelect from '@/components/ui/BaseSelect.vue'
 import { useToastStore } from '@/stores/toast'
 
 interface Tenant {
@@ -33,12 +35,34 @@ const actionLabels: Record<Exclude<TenantAction, 'status'>, string> = {
 const toast = useToastStore()
 const route = useRoute()
 const router = useRouter()
-const activeTab = computed(() => route.query.tab === 'codes' ? 'codes' : 'tenants')
+const activeTab = computed(() => route.query.tab === 'codes' || route.query.tab === 'audit' ? route.query.tab : 'tenants')
 const loading = ref(false)
 const tenants = ref<Tenant[]>([])
 const stats = ref({ total: 0, unused: 0, redeemed: 0, batchCount: 0 })
 const selectedTenant = ref('')
 const managed = computed(() => tenants.value.find(tenant => tenant.id === selectedTenant.value))
+const tenantFilters = [
+  { value: '', label: '全部租户' },
+  { value: 'expiring', label: '七天内到期' },
+  { value: 'expired', label: '已到期' },
+  { value: 'disabled', label: '已停用' },
+]
+const tenantFilter = computed({
+  get: () => typeof route.query.filter === 'string' ? route.query.filter : '',
+  set: (value: string | number) => { void router.replace({ query: value ? { filter: String(value) } : {} }) },
+})
+const visibleTenants = computed(() => {
+  const now = Date.now()
+  return tenants.value.filter((tenant) => {
+    if (tenantFilter.value === 'disabled')
+      return tenant.status === 'disabled'
+    if (tenantFilter.value === 'expired')
+      return tenant.status === 'active' && tenant.expiresAt !== null && tenant.expiresAt <= now
+    if (tenantFilter.value === 'expiring')
+      return tenant.status === 'active' && tenant.expiresAt !== null && tenant.expiresAt > now && tenant.expiresAt <= now + 7 * 86_400_000
+    return true
+  })
+})
 let loadSequence = 0
 
 const tenantModal = ref({
@@ -175,6 +199,19 @@ async function submitTenantAction() {
   }
 }
 
+watch([tenants, () => route.query.manage, () => route.query.action], () => {
+  if (activeTab.value !== 'tenants' || typeof route.query.manage !== 'string')
+    return
+  const tenant = tenants.value.find(candidate => candidate.id === route.query.manage)
+  if (!tenant)
+    return
+  const { manage: _manage, action, ...query } = route.query
+  selectedTenant.value = tenant.id
+  if (action === 'extend')
+    openTenantModal(tenant, 'extend')
+  void router.replace({ query })
+}, { immediate: true })
+
 onMounted(loadOverview)
 </script>
 
@@ -204,20 +241,27 @@ onMounted(loadOverview)
       <RouterLink :to="{ query: { tab: 'codes' } }" class="tab-btn" :class="{ 'tab-btn--active': activeTab === 'codes' }" :aria-current="activeTab === 'codes' ? 'page' : undefined">
         激活码
       </RouterLink>
+      <RouterLink :to="{ query: { tab: 'audit' } }" class="tab-btn" :class="{ 'tab-btn--active': activeTab === 'audit' }" :aria-current="activeTab === 'audit' ? 'page' : undefined">
+        操作记录
+      </RouterLink>
     </nav>
 
     <AdminCodes v-if="activeTab === 'codes'" :tenants="tenants" @manage-tenant="selectedTenant = $event" @changed="loadOverview" />
+    <AdminAudit v-else-if="activeTab === 'audit'" />
     <section v-else class="farm-card rounded-xl" aria-labelledby="tenants-title">
       <div class="flex items-center justify-between gap-3 p-4">
         <h2 id="tenants-title" class="font-semibold">
           租户列表
         </h2>
-        <BaseButton variant="secondary" size="sm" :loading="loading" @click="loadOverview">
-          刷新
-        </BaseButton>
+        <div class="flex items-center gap-2">
+          <BaseSelect v-model="tenantFilter" :options="tenantFilters" class="w-30" aria-label="筛选租户" />
+          <BaseButton variant="secondary" size="sm" :loading="loading" @click="loadOverview">
+            刷新
+          </BaseButton>
+        </div>
       </div>
-      <ul v-if="tenants.length" class="m-0 list-none p-0">
-        <li v-for="tenant in tenants" :key="tenant.id" class="tenant-row">
+      <ul v-if="visibleTenants.length" class="m-0 list-none p-0">
+        <li v-for="tenant in visibleTenants" :key="tenant.id" class="tenant-row">
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
               <button type="button" class="tenant-link break-all font-semibold" @click="selectedTenant = tenant.id">
@@ -247,7 +291,7 @@ onMounted(loadOverview)
         </li>
       </ul>
       <p v-else class="muted border-t p-7 text-center text-sm">
-        {{ loading ? '正在读取租户…' : '暂无租户。可到激活码页面生成新用户码。' }}
+        {{ loading ? '正在读取租户…' : tenants.length ? '没有符合条件的租户' : '暂无租户。可到激活码页面生成新用户码。' }}
       </p>
     </section>
 

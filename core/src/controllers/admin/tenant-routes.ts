@@ -5,11 +5,24 @@ export {};
 const store = require('../../models/store');
 const userStore = require('../../models/user-store');
 const codeStore = require('../../models/activation-code-store');
+const auditStore = require('../../models/admin-audit-store');
 const { CONFIG } = require('../../config/config');
 const { createModuleLogger } = require('../../services/logger');
-const { getAccountList, handleApiError, requireOwner } = require('./middleware');
+const { getAccountList, rawAccountList, handleApiError, requireOwner } = require('./middleware');
 
 const tenantLogger = createModuleLogger('tenant');
+
+function recordAudit(req: Request, action: string, target: {
+    tenantId?: string; username?: string; codeId?: string; batchId?: string; count?: number;
+}, required = false): void {
+    const actor = (req as any).auth.user;
+    try {
+        auditStore.appendAudit({ action, actorId: actor.id, actor: actor.username, ...target });
+    } catch (error: any) {
+        if (required) throw error;
+        tenantLogger.warn('管理员操作记录写入失败', { action, actorId: actor.id, ...target, error: error?.message });
+    }
+}
 
 function kickSockets(ctx: AdminContext, userId: string): void {
     if (!ctx.io) return;
@@ -23,21 +36,35 @@ function tenantAccountList(ctx: AdminContext, tenantId: string): any[] {
 }
 
 function tenantSummaries(ctx: AdminContext): any[] {
+    const counts = new Map<string, { accountCount: number; runningCount: number }>();
+    for (const account of rawAccountList(ctx)) {
+        const ownerId = String(account.ownerId || 'owner');
+        const count = counts.get(ownerId) || { accountCount: 0, runningCount: 0 };
+        count.accountCount++;
+        if (account.running === true) count.runningCount++;
+        counts.set(ownerId, count);
+    }
     return userStore.listUsers()
         .filter((user: any) => user.role === 'tenant')
-        .map((user: any) => {
-            const accounts = tenantAccountList(ctx, user.id);
-            return {
-                ...user,
-                accountCount: accounts.length,
-                runningCount: accounts.filter((account: any) => account.running === true).length,
-            };
-        })
+        .map((user: any) => ({ ...user, ...(counts.get(user.id) || { accountCount: 0, runningCount: 0 }) }))
         .sort((a: any, b: any) => b.createdAt - a.createdAt);
 }
 
 function mountTenantRoutes(app: Application, ctx: AdminContext): void {
     app.use('/api/admin', requireOwner);
+
+    app.get('/api/admin/audit', (req: Request, res: Response) => {
+        try {
+            const data = auditStore.listAudit({
+                category: String(req.query.category || ''),
+                search: String(req.query.search || ''),
+                page: Number(req.query.page),
+            });
+            return res.json({ ok: true, data });
+        } catch (e: any) {
+            return handleApiError(res, e);
+        }
+    });
 
     app.get('/api/admin/overview', (_req: Request, res: Response) => {
         const tenants = tenantSummaries(ctx);
@@ -71,6 +98,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
             });
             if (!created.ok) return res.status(400).json({ ok: false, error: created.message, errorType: created.error });
             tenantLogger.info('创建租户', { username: created.user.username, days, operator: 'owner' });
+            recordAudit(req, 'tenant.create', { tenantId: created.user.id, username: created.user.username });
             return res.json({ ok: true, data: userStore.publicUser(created.user) });
         } catch (e: any) {
             return handleApiError(res, e);
@@ -78,13 +106,17 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
     });
 
     app.post('/api/admin/tenants/:id/extend', (req: Request, res: Response) => {
+        const previous = userStore.getUserById(req.params.id);
         const result = userStore.extendTenant(req.params.id, (req.body || {}).days);
         if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
         tenantLogger.info('延期租户', { id: req.params.id, days: result.days, expiresAt: result.user.expiresAt });
+        if (previous && userStore.isExpired(previous)) ctx.provider.recoverTenantAccounts?.(result.user.id);
+        recordAudit(req, 'tenant.extend', { tenantId: result.user.id, username: result.user.username });
         return res.json({ ok: true, data: result.user });
     });
 
     app.post('/api/admin/tenants/:id/status', (req: Request, res: Response) => {
+        const previous = userStore.getUserById(req.params.id);
         const status = String((req.body || {}).status || '');
         const result = userStore.updateTenant(req.params.id, { status });
         if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
@@ -92,16 +124,20 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
             ctx.tokens.deleteByUserId(String(req.params.id));
             kickSockets(ctx, String(req.params.id));
             for (const account of tenantAccountList(ctx, String(req.params.id))) {
-                try { ctx.provider.stopAccount(account.id); } catch { /* ignore */ }
+                try { ctx.provider.stopAccount(account.id, { preserveIntent: true }); } catch { /* Retry during lifecycle sweep. */ }
             }
+        } else if (previous?.status === 'disabled') {
+            ctx.provider.recoverTenantAccounts?.(result.user.id);
         }
         tenantLogger.info('更新租户状态', { id: req.params.id, status: result.user.status });
+        recordAudit(req, result.user.status === 'disabled' ? 'tenant.disable' : 'tenant.enable', { tenantId: result.user.id, username: result.user.username });
         return res.json({ ok: true, data: result.user });
     });
 
     app.post('/api/admin/tenants/:id/quota', (req: Request, res: Response) => {
         const result = userStore.updateTenant(req.params.id, { maxAccounts: (req.body || {}).maxAccounts });
         if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
+        recordAudit(req, 'tenant.quota', { tenantId: result.user.id, username: result.user.username });
         return res.json({ ok: true, data: result.user });
     });
 
@@ -113,12 +149,16 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         ctx.tokens.deleteByUserId(req.params.id);
         kickSockets(ctx, String(req.params.id));
         tenantLogger.info('重置租户密码', { id: req.params.id });
+        recordAudit(req, 'tenant.password', { tenantId: target.id, username: target.username });
         return res.json({ ok: true, data: result.user });
     });
 
     app.post('/api/admin/tenants/:id/kick', (req: Request, res: Response) => {
+        const target = userStore.getUserById(req.params.id);
+        if (target?.role !== 'tenant') return res.status(404).json({ ok: false, error: '租户不存在' });
         const removed = ctx.tokens.deleteByUserId(req.params.id);
         kickSockets(ctx, String(req.params.id));
+        recordAudit(req, 'tenant.kick', { tenantId: target.id, username: target.username, count: removed });
         return res.json({ ok: true, data: { removed } });
     });
 
@@ -142,6 +182,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
             }
             const deleted = userStore.deleteTenant(target.id);
             tenantLogger.warn('删除租户', { id: target.id, username: target.username, accounts: accounts.length });
+            recordAudit(req, 'tenant.delete', { tenantId: target.id, username: target.username, count: accounts.length });
             return res.json({ ok: true, data: { ...deleted.user, deletedAccounts: accounts.length } });
         } catch (e: any) {
             return handleApiError(res, e);
@@ -149,12 +190,25 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
     });
 
     app.get('/api/admin/codes', (req: Request, res: Response) => {
-        const list = codeStore.listCodes({
+        const filters = {
             status: String(req.query.status || ''),
             type: String(req.query.type || ''),
             batchId: String(req.query.batchId || ''),
+        };
+        const data = req.query.page === undefined ? codeStore.listCodes(filters) : codeStore.listCodesPage({
+            ...filters,
+            tenantId: String(req.query.tenantId || ''),
+            search: String(req.query.search || ''),
+            page: Number(req.query.page),
+            pageSize: Number(req.query.pageSize),
         });
-        res.json({ ok: true, data: list });
+        res.json({ ok: true, data });
+    });
+
+    app.get('/api/admin/codes/:id', (req: Request, res: Response) => {
+        const code = codeStore.getPublicCode(req.params.id);
+        if (!code) return res.status(404).json({ ok: false, error: '激活码不存在' });
+        return res.json({ ok: true, data: code });
     });
 
     app.get('/api/admin/codes/:id/value', (req: Request, res: Response) => {
@@ -165,6 +219,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
                     .json({ ok: false, error: result.message, errorType: result.error });
             }
             tenantLogger.info('读取完整激活码', { id: req.params.id });
+            recordAudit(req, 'code.reveal', { codeId: String(req.params.id) }, true);
             return res.json({ ok: true, data: { code: result.code } });
         } catch (e: any) {
             return handleApiError(res, e);
@@ -176,6 +231,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
             const result = codeStore.revealBatch(req.params.batchId);
             if (!result.ok) return res.status(404).json({ ok: false, error: result.message, errorType: result.error });
             tenantLogger.info('读取批次待兑换码', { batchId: req.params.batchId, count: result.codes.length });
+            recordAudit(req, 'code.reveal_batch', { batchId: String(req.params.batchId), count: result.codes.length }, true);
             return res.json({ ok: true, data: result });
         } catch (e: any) {
             return handleApiError(res, e);
@@ -197,6 +253,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
             });
             if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
             tenantLogger.info('生成激活码', { batchId: result.batchId, count: result.codes.length, type: body.type, days: body.days });
+            recordAudit(req, 'code.generate', { batchId: result.batchId, count: result.codes.length });
             return res.json({ ok: true, data: result });
         } catch (e: any) {
             return handleApiError(res, e);
@@ -212,6 +269,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
                 return res.status(status).json({ ok: false, error: result.message, errorType: result.error });
             }
             tenantLogger.info('修改激活码', { id: req.params.id });
+            recordAudit(req, 'code.update', { codeId: result.code.id });
             return res.json({ ok: true, data: result.code });
         } catch (e: any) {
             return handleApiError(res, e);
@@ -226,6 +284,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
                 return res.status(status).json({ ok: false, error: result.message, errorType: result.error });
             }
             tenantLogger.warn('换发激活码', { id: req.params.id, replacementId: result.codes[0].id, batchId: result.batchId });
+            recordAudit(req, 'code.replace', { codeId: String(req.params.id), batchId: result.batchId });
             return res.json({ ok: true, data: result });
         } catch (e: any) {
             return handleApiError(res, e);
@@ -236,6 +295,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         const result = codeStore.revokeCode(req.params.id);
         if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
         tenantLogger.warn('吊销激活码', { id: req.params.id, codeHint: result.code.codeHint });
+        recordAudit(req, 'code.revoke', { codeId: result.code.id });
         return res.json({ ok: true, data: result.code });
     });
 
@@ -243,6 +303,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         const result = codeStore.revokeBatch(req.params.batchId);
         if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
         tenantLogger.warn('吊销激活码批次', { batchId: req.params.batchId, revoked: result.revoked });
+        recordAudit(req, 'code.revoke_batch', { batchId: String(req.params.batchId), count: result.revoked });
         return res.json({ ok: true, data: result });
     });
 }

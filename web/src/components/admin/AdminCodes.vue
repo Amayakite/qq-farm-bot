@@ -54,9 +54,12 @@ const loadError = ref('')
 const search = ref('')
 const filterStatus = ref('')
 const filterType = ref('')
-const visibleCount = ref(25)
+const page = ref(1)
+const total = ref(0)
+const totalAll = ref(0)
+const pageSize = 25
 const panel = ref<'generate' | 'details' | 'delivery' | ''>('')
-const selectedId = ref('')
+const selected = ref<CodeRecord>()
 const delivery = ref<Delivery | null>(null)
 const isBatchDelivery = computed(() => delivery.value?.unavailable !== undefined)
 const deliveryText = ref<HTMLTextAreaElement | null>(null)
@@ -69,6 +72,7 @@ const confirmation = ref<'revoke' | 'replace' | 'batch' | ''>('')
 const confirmationBatch = ref('')
 let listSequence = 0
 let revealSequence = 0
+let detailsSequence = 0
 
 const statuses = {
   unused: '待兑换',
@@ -84,28 +88,13 @@ const tenantOptions = computed(() => [
   ...props.tenants.map(tenant => ({ label: tenant.username, value: tenant.id })),
 ])
 const tenantNames = computed(() => new Map(props.tenants.map(tenant => [tenant.id, tenant.username])))
-const selected = computed(() => records.value.find(record => record.id === selectedId.value))
 const canEditTerms = computed(() => !!selected.value && ['unused', 'expired'].includes(selected.value.status))
 const canReplace = computed(() => !!selected.value && selected.value.status !== 'redeemed' && !selected.value.replacedBy
   && (!selected.value.targetTenantId || tenantNames.value.has(selected.value.targetTenantId)))
 const batchFilter = computed(() => typeof route.query.batch === 'string' ? route.query.batch : '')
 const tenantFilter = computed(() => typeof route.query.tenant === 'string' ? route.query.tenant : '')
-const batchCodes = computed(() => batchFilter.value ? records.value.filter(record => record.batchId === batchFilter.value) : [])
-const batchRevocable = computed(() => batchCodes.value.filter(record => record.status === 'unused' || record.status === 'expired').length)
-const batchHasUnused = computed(() => batchCodes.value.some(record => record.status === 'unused'))
-const filtered = computed(() => {
-  const keyword = search.value.trim().toLowerCase()
-  return records.value.filter((record) => {
-    if ((filterStatus.value && record.status !== filterStatus.value)
-      || (filterType.value && record.type !== filterType.value)
-      || (batchFilter.value && record.batchId !== batchFilter.value)
-      || (tenantFilter.value && record.redeemedBy !== tenantFilter.value && record.targetTenantId !== tenantFilter.value)) {
-      return false
-    }
-    return !keyword || [record.codeHint, record.note, record.batchId, tenantName(record.redeemedBy), tenantName(record.targetTenantId)]
-      .some(value => value.toLowerCase().includes(keyword))
-  })
-})
+const batchCounts = ref({ unused: 0, revocable: 0 })
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 const generatedText = computed(() => delivery.value?.codes.map(record => record.code).join('\n') || '')
 
 function formDefaults() {
@@ -142,16 +131,27 @@ function clearTenantFilter() {
   void router.push({ query })
 }
 
-async function loadCodes() {
+async function loadCodes(targetPage = page.value) {
   const sequence = ++listSequence
   loading.value = true
   loadError.value = ''
   try {
-    const { data } = await api.get('/api/admin/codes', { skipErrorToast: true } as any)
+    const { data } = await api.get('/api/admin/codes', {
+      params: { page: targetPage, pageSize, search: search.value, status: filterStatus.value, type: filterType.value, batchId: batchFilter.value, tenantId: tenantFilter.value },
+      skipErrorToast: true,
+    } as any)
     if (!data?.ok)
       throw new Error(getApiErrorMessage(data, '激活码加载失败'))
-    if (sequence === listSequence)
-      records.value = data.data
+    if (sequence === listSequence) {
+      records.value = data.data.items
+      total.value = data.data.total
+      totalAll.value = data.data.totalAll
+      page.value = data.data.page
+      batchCounts.value = data.data.batch
+      const updated = records.value.find(record => record.id === selected.value?.id)
+      if (updated)
+        selected.value = updated
+    }
   }
   catch (error) {
     if (sequence === listSequence)
@@ -164,6 +164,7 @@ async function loadCodes() {
 }
 
 function startIssue(target = '') {
+  detailsSequence++
   clearReveal()
   form.value = formDefaults()
   formError.value = ''
@@ -176,8 +177,9 @@ function startIssue(target = '') {
 }
 
 function openDetails(record: CodeRecord) {
+  detailsSequence++
   clearReveal()
-  selectedId.value = record.id
+  selected.value = record
   form.value = {
     type: record.type,
     count: 1,
@@ -191,16 +193,31 @@ function openDetails(record: CodeRecord) {
   panel.value = 'details'
 }
 
-function openRelated(id: string) {
+async function openRelated(id: string) {
+  const sequence = ++detailsSequence
   const record = records.value.find(item => item.id === id)
-  if (record)
+  if (record) {
     openDetails(record)
+    return
+  }
+  try {
+    const { data } = await api.get(`/api/admin/codes/${encodeURIComponent(id)}`, { skipErrorToast: true } as any)
+    if (!data?.ok)
+      throw new Error(getApiErrorMessage(data, '无法读取激活码详情'))
+    if (sequence === detailsSequence)
+      openDetails(data.data)
+  }
+  catch (error) {
+    if (sequence === detailsSequence)
+      toast.error(getApiErrorMessage(error, '无法读取激活码详情'))
+  }
 }
 
 function closePanel() {
   if (busy.value)
     return
   panel.value = ''
+  detailsSequence++
   delivery.value = null
   formError.value = ''
   clearReveal()
@@ -241,7 +258,7 @@ async function revealCode(record: CodeRecord, copy = false) {
           return
       }
     }
-    if (panel.value !== 'details' || selectedId.value !== record.id)
+    if (panel.value !== 'details' || selected.value?.id !== record.id)
       openDetails(record)
     fullCode.value = value
     if (copy) {
@@ -311,13 +328,14 @@ async function saveForm() {
   try {
     const { data } = creating
       ? await api.post('/api/admin/codes', { ...payload, type: form.value.type, count: Number(form.value.count) }, { skipErrorToast: true } as any)
-      : await api.put(`/api/admin/codes/${selectedId.value}`, payload, { skipErrorToast: true } as any)
+      : await api.put(`/api/admin/codes/${selected.value?.id}`, payload, { skipErrorToast: true } as any)
     if (!data?.ok)
       throw new Error(getApiErrorMessage(data, '保存失败'))
     if (creating) {
       showDelivery(data.data)
     }
     else {
+      selected.value = data.data
       records.value = records.value.map(record => record.id === data.data.id ? data.data : record)
       toast.success('已保存激活码设置')
     }
@@ -341,17 +359,21 @@ async function handleConfirmation() {
   const batch = action === 'batch'
   const pathname = batch
     ? `batch/${encodeURIComponent(confirmationBatch.value)}/revoke`
-    : `${selectedId.value}/${action}`
+    : `${selected.value?.id}/${action}`
   busy.value = true
   try {
     const { data } = await api.post(`/api/admin/codes/${pathname}`, undefined, { skipErrorToast: true } as any)
     if (!data?.ok)
       throw new Error(getApiErrorMessage(data, '操作失败'))
     confirmation.value = ''
-    if (action === 'replace')
+    if (action === 'replace') {
       showDelivery(data.data)
-    else
+    }
+    else {
+      if (!batch)
+        selected.value = data.data
       toast.success(batch ? `已吊销 ${data.data.revoked} 个未兑换的码` : '激活码已吊销')
+    }
     emit('changed')
     await loadCodes()
   }
@@ -395,9 +417,16 @@ function manageTenant(id: string) {
   emit('manageTenant', id)
 }
 
-watch([search, filterStatus, filterType, batchFilter, tenantFilter], () => {
-  visibleCount.value = 25
+watch([search, filterStatus, filterType, batchFilter, tenantFilter], (_values, _previous, onCleanup) => {
+  listSequence++
+  loading.value = true
+  const timer = window.setTimeout(() => loadCodes(1), 150)
+  onCleanup(() => clearTimeout(timer))
 })
+watch(() => route.query.record, (id) => {
+  if (typeof id === 'string')
+    void openRelated(id)
+}, { immediate: true })
 watch(() => route.query.issue, (issue) => {
   if (issue !== 'new' && issue !== 'renew')
     return
@@ -405,8 +434,12 @@ watch(() => route.query.issue, (issue) => {
   startIssue(issue === 'renew' && typeof target === 'string' ? target : '')
   void router.replace({ query })
 }, { immediate: true })
-onMounted(loadCodes)
-onBeforeUnmount(clearReveal)
+onMounted(() => loadCodes())
+onBeforeUnmount(() => {
+  listSequence++
+  detailsSequence++
+  clearReveal()
+})
 </script>
 
 <template>
@@ -417,11 +450,11 @@ onBeforeUnmount(clearReveal)
           激活码
         </h2>
         <p class="codes-muted mt-1 text-xs">
-          {{ filtered.length }} 条记录<span v-if="filtered.length !== records.length"> / 共 {{ records.length }} 条</span>
+          {{ total }} 条记录<span v-if="total !== totalAll"> / 共 {{ totalAll }} 条</span>
         </p>
       </div>
       <div class="flex flex-wrap gap-2">
-        <BaseButton variant="secondary" size="sm" :loading="loading" @click="loadCodes">
+        <BaseButton variant="secondary" size="sm" :loading="loading" @click="loadCodes()">
           刷新
         </BaseButton>
         <BaseButton variant="primary" size="sm" @click="startIssue()">
@@ -443,7 +476,7 @@ onBeforeUnmount(clearReveal)
         租户 {{ tenantName(tenantFilter) }} <span class="i-carbon-close" aria-hidden="true" /><span class="sr-only">清除租户筛选</span>
       </button>
       <BaseButton
-        v-if="batchHasUnused"
+        v-if="!loading && batchCounts.unused"
         variant="secondary"
         size="sm"
         :loading="revealing === 'batch'"
@@ -452,25 +485,25 @@ onBeforeUnmount(clearReveal)
         查看批次完整码
       </BaseButton>
       <BaseButton
-        v-if="batchRevocable"
+        v-if="!loading && batchCounts.revocable"
         variant="danger"
         size="sm"
         class="scope-action"
         @click="confirmationBatch = batchFilter; confirmation = 'batch'"
       >
-        吊销批次未兑换码（{{ batchRevocable }}）
+        吊销批次未兑换码（{{ batchCounts.revocable }}）
       </BaseButton>
     </div>
 
     <p v-if="loadError" class="px-4 py-2 text-sm text-red-700 dark:text-red-300" role="alert">
       {{ loadError }}
     </p>
-    <div v-if="filtered.length" class="codes-list">
+    <div v-if="records.length" class="codes-list">
       <div class="code-row code-head" aria-hidden="true">
         <span>激活码</span><span>权益与截止</span><span>关联租户</span><span>批次</span><span>操作</span>
       </div>
       <ul aria-label="激活码列表" class="m-0 list-none p-0">
-        <li v-for="record in filtered.slice(0, visibleCount)" :key="record.id" class="code-row">
+        <li v-for="record in records" :key="record.id" class="code-row">
           <div class="code-identity min-w-0">
             <div class="flex flex-wrap items-center gap-2">
               <span class="code-hint">•••• {{ record.codeHint }}</span>
@@ -525,15 +558,19 @@ onBeforeUnmount(clearReveal)
           </div>
         </li>
       </ul>
-      <div v-if="visibleCount < filtered.length" class="border-t p-3 text-center">
-        <BaseButton variant="ghost" size="sm" @click="visibleCount += 25">
-          显示更多
+      <div v-if="totalPages > 1" class="flex items-center justify-center gap-3 border-t p-3 text-sm">
+        <BaseButton variant="ghost" size="sm" :disabled="page <= 1 || loading" @click="loadCodes(page - 1)">
+          上一页
+        </BaseButton>
+        <span class="codes-muted">{{ page }} / {{ totalPages }}</span>
+        <BaseButton variant="ghost" size="sm" :disabled="page >= totalPages || loading" @click="loadCodes(page + 1)">
+          下一页
         </BaseButton>
       </div>
     </div>
     <div v-else class="codes-empty">
       <span class="i-carbon-ticket text-3xl" aria-hidden="true" />
-      <p>{{ loading ? '正在读取激活码…' : records.length ? '没有匹配的激活码' : '还没有激活码' }}</p>
+      <p>{{ loading ? '正在读取激活码…' : totalAll ? '没有匹配的激活码' : '还没有激活码' }}</p>
     </div>
   </section>
 

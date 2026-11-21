@@ -74,7 +74,7 @@ async function addAccount(data: any, isRelogin = false) {
   loading.value = true
   errorMessage.value = ''
   try {
-    const res = await api.post('/api/accounts', { ...data, name })
+    const res = await api.post('/api/accounts', { ...data, name, ...(props.editData?.id ? { id: props.editData.id } : {}) })
     if (res.data.ok) {
       emit('saved')
       close()
