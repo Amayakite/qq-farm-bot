@@ -104,7 +104,7 @@ onMounted(load)
         </p>
       </div>
       <div class="flex flex-wrap gap-2">
-        <BaseButton variant="primary" size="sm" to="/admin/tenants?tab=codes">
+        <BaseButton variant="primary" size="sm" to="/admin/tenants?tab=codes&issue=new">
           <span class="i-carbon-add" />
           生成激活码
         </BaseButton>

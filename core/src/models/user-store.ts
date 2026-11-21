@@ -304,9 +304,12 @@ function updateTenant(id: unknown, patch: { status?: string; expiresAt?: number;
     return { ok: true, user: publicUser(user) };
 }
 
-function extendTenant(id: unknown, days: unknown, redemption?: { codeId: string; maxAccounts: number }): any {
+function extendTenant(id: unknown, days: unknown, redemption?: { codeId: string; maxAccounts: number; targetTenantId?: string | null }): any {
     const current = getUserById(id);
     if (!current || current.role !== 'tenant') return { ok: false, error: 'not_found', message: '租户不存在' };
+    if (redemption?.targetTenantId && redemption.targetTenantId !== current.id) {
+        return { ok: false, error: 'wrong_tenant', message: '此续费码不适用于当前账号' };
+    }
     if (redemption && (current.status === 'disabled' || getCodeRedemption(redemption.codeId))) {
         return { ok: false, error: 'renewal_unavailable', message: '续费码已使用或账号已停用' };
     }

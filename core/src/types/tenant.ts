@@ -3,6 +3,7 @@ export {};
 export type UserRole = 'owner' | 'tenant';
 export type UserStatus = 'active' | 'disabled';
 export type ActivationCodeType = 'new' | 'renew';
+export type ActivationCodeStatus = 'unused' | 'redeemed' | 'revoked' | 'expired';
 
 export interface UserRecord {
     id: string;
@@ -36,6 +37,7 @@ export interface PublicUser {
 export interface ActivationCodeRecord {
     id: string;
     codeHash: string;
+    encryptedCode: string | null;
     /** 仅用于后台辨认，例如末四位。 */
     codeHint: string;
     type: ActivationCodeType;
@@ -47,25 +49,17 @@ export interface ActivationCodeRecord {
     createdBy: string;
     batchId: string;
     note: string;
+    targetTenantId: string | null;
+    replacesId: string | null;
+    replacedBy: string | null;
     redeemedAt: number | null;
     redeemedBy: string | null;
     revokedAt: number | null;
 }
 
-export interface PublicActivationCode {
-    id: string;
-    codeHint: string;
-    type: ActivationCodeType;
-    days: number;
-    maxAccounts: number;
-    redeemBefore: number | null;
-    createdAt: number;
-    createdBy: string;
-    batchId: string;
-    note: string;
-    redeemedAt: number | null;
-    redeemedBy: string | null;
-    revokedAt: number | null;
+export interface PublicActivationCode extends Omit<ActivationCodeRecord, 'codeHash' | 'encryptedCode'> {
+    status: ActivationCodeStatus;
+    hasFullCode: boolean;
 }
 
 export interface AuthSession {
