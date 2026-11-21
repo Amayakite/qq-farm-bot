@@ -1,12 +1,15 @@
 import axios from 'axios'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { useAppStore } from '@/stores/app'
 
 export interface PublicConfig {
   hideUpstreamLinks: boolean
   siteName: string
   registrationEnabled: boolean
   redeemEnabled: boolean
+  brandColor: string
+  brandPreset: string
 }
 
 let inflight: Promise<void> | null = null
@@ -16,16 +19,25 @@ export const usePublicConfigStore = defineStore('public-config', () => {
   const siteName = ref('QQ农场智能助手')
   const registrationEnabled = ref(true)
   const redeemEnabled = ref(true)
+  const brandColor = ref('#2f6f9f')
+  const brandPreset = ref('ocean')
   const loaded = ref(false)
 
   function apply(data: Partial<PublicConfig> | undefined) {
     if (!data)
       return
     hideUpstreamLinks.value = data.hideUpstreamLinks === true
-    if (data.siteName)
+    if (data.siteName) {
       siteName.value = String(data.siteName)
+      document.title = siteName.value
+    }
     registrationEnabled.value = data.registrationEnabled !== false
     redeemEnabled.value = data.redeemEnabled !== false
+    if (data.brandColor) {
+      brandColor.value = data.brandColor
+      brandPreset.value = data.brandPreset || 'custom'
+      useAppStore().applyBrand(data.brandColor, brandPreset.value)
+    }
   }
 
   async function fetchConfig(force = false) {
@@ -53,6 +65,8 @@ export const usePublicConfigStore = defineStore('public-config', () => {
     siteName,
     registrationEnabled,
     redeemEnabled,
+    brandColor,
+    brandPreset,
     loaded,
     fetchConfig,
     apply,

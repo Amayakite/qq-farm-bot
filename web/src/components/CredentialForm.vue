@@ -84,7 +84,7 @@ async function handleSubmit() {
   }
   success.value = props.mode === 'redeem' ? '激活成功，正在进入面板…' : '续费成功，正在进入面板…'
   setTimeout(() => {
-    window.location.href = '/'
+    window.location.href = userStore.homePath
   }, 600)
 }
 
@@ -195,15 +195,15 @@ onMounted(() => {
   color: var(--ui-ink);
   background-color: var(--ui-bg);
   background-image:
-    linear-gradient(rgba(67, 141, 99, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(67, 141, 99, 0.045) 1px, transparent 1px);
+    linear-gradient(rgba(var(--ui-primary-rgb), 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--ui-primary-rgb), 0.045) 1px, transparent 1px);
   background-size: 42px 42px;
 }
 
 .credential-page::before {
   position: absolute;
   inset: 8% 7%;
-  border: 1px solid rgba(67, 141, 99, 0.08);
+  border: 1px solid rgba(var(--ui-primary-rgb), 0.08);
   border-radius: 36px;
   background: color-mix(in srgb, var(--ui-surface-strong) 22%, transparent);
   content: '';
@@ -249,7 +249,7 @@ onMounted(() => {
 .notice {
   margin-bottom: 14px;
   padding: 10px 12px;
-  border: 1px solid rgba(67, 141, 99, 0.16);
+  border: 1px solid rgba(var(--ui-primary-rgb), 0.16);
   border-radius: 10px;
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
@@ -281,7 +281,7 @@ onMounted(() => {
 }
 
 .success-message {
-  border-color: rgba(67, 141, 99, 0.18);
+  border-color: rgba(var(--ui-primary-rgb), 0.18);
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
 }

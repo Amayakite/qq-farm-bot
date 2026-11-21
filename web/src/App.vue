@@ -7,14 +7,21 @@ import { NMessageProvider } from 'naive-ui/es/message'
 import { NNotificationProvider } from 'naive-ui/es/notification'
 import { darkTheme } from 'naive-ui/es/themes'
 import { storeToRefs } from 'pinia'
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 import ToastContainer from '@/components/ToastContainer.vue'
 import { useAppStore } from '@/stores/app'
+import { usePublicConfigStore } from '@/stores/public-config'
 import { createNaiveThemeOverrides } from '@/ui/naive-theme'
 
-const { isDark } = storeToRefs(useAppStore())
-const themeOverrides = computed(() => createNaiveThemeOverrides(isDark.value))
+const appStore = useAppStore()
+const publicConfig = usePublicConfigStore()
+const { isDark, brandColor } = storeToRefs(appStore)
+const themeOverrides = computed(() => createNaiveThemeOverrides(isDark.value, brandColor.value))
+
+onMounted(() => {
+  publicConfig.fetchConfig()
+})
 </script>
 
 <template>

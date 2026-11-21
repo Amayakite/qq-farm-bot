@@ -6,6 +6,7 @@ export {};
 
 const { Server } = require('socket.io');
 const SocketIOServer = Server;
+const { getUI } = require('../../models/store');
 
 const {
     resolveAuthContext,
@@ -152,6 +153,8 @@ function setupSocketIO(ctx: AdminContext): void {
             || (socket.handshake.query && socket.handshake.query.accountId)
             || '';
         applySocketSubscription(ctx, socket, initialAccountRef);
+        const { brandColor, brandPreset } = getUI();
+        socket.emit('appearance:update', { brandColor, brandPreset });
         socket.emit('ready', { ok: true, ts: Date.now() });
 
         socket.on('subscribe', (payload: any) => {

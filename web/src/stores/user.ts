@@ -50,6 +50,7 @@ export const useUserStore = defineStore('user', () => {
   const username = computed(() => userInfo.value?.username || '')
   const avatar = computed(() => userInfo.value?.avatar || '')
   const roleLabel = computed(() => isOwner.value ? '超级管理员' : '用户')
+  const homePath = computed(() => isOwner.value ? '/admin' : '/home')
   const expiresAt = computed(() => userInfo.value?.expiresAt || null)
   const isExpired = computed(() => {
     const value = expiresAt.value
@@ -175,6 +176,7 @@ export const useUserStore = defineStore('user', () => {
     username,
     avatar,
     roleLabel,
+    homePath,
     expiresAt,
     expiresInDays,
     isExpired,

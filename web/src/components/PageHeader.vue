@@ -2,9 +2,10 @@
 import { useMediaQuery } from '@vueuse/core'
 import { NButton } from 'naive-ui/es/button'
 import { storeToRefs } from 'pinia'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import GameSpaceSwitch from '@/components/GameSpaceSwitch.vue'
+import HelpDrawer from '@/components/HelpDrawer.vue'
 import ThemeSwitcher from '@/components/ThemeSwitcher.vue'
 import { allMenuRoutes } from '@/router/menu'
 import { useAppStore } from '@/stores/app'
@@ -14,6 +15,8 @@ const appStore = useAppStore()
 const isDesktop = useMediaQuery('(min-width: 1024px)')
 const { sidebarOpen, sidebarCollapsed } = storeToRefs(appStore)
 const currentPage = computed(() => allMenuRoutes.find(item => item.name === route.name))
+const showHelp = ref(false)
+const showSpaceSwitch = computed(() => !route.meta.hideSpaceSwitch)
 const navigationExpanded = computed(() => isDesktop.value ? !sidebarCollapsed.value : sidebarOpen.value)
 const navigationToggleLabel = computed(() => navigationExpanded.value ? '收起侧栏' : '展开侧栏')
 const navigationIcon = computed(() => {
@@ -42,9 +45,13 @@ function toggleNavigation() {
       <NButton quaternary circle aria-controls="app-sidebar" :aria-expanded="navigationExpanded" :aria-label="navigationToggleLabel" :title="navigationToggleLabel" @click="toggleNavigation">
         <div class="text-xl" :class="navigationIcon" />
       </NButton>
+      <NButton quaternary circle title="使用帮助" aria-label="打开使用帮助" @click="showHelp = true">
+        <div class="i-carbon-help text-xl" />
+      </NButton>
       <ThemeSwitcher />
-      <GameSpaceSwitch />
+      <GameSpaceSwitch v-if="showSpaceSwitch" />
     </div>
+    <HelpDrawer v-model:show="showHelp" />
   </header>
 </template>
 

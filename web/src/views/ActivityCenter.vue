@@ -301,7 +301,7 @@ onUnmounted(() => {
 }
 
 .activity-entry--supported:hover {
-  border-color: rgba(67, 141, 99, 0.3);
+  border-color: rgba(var(--ui-primary-rgb), 0.3);
   box-shadow: var(--ui-shadow-md);
   transform: translateY(-1px);
 }
@@ -348,7 +348,7 @@ onUnmounted(() => {
 
 .activity-entry__status {
   padding: 3px 8px;
-  border: 1px solid rgba(67, 141, 99, 0.18);
+  border: 1px solid rgba(var(--ui-primary-rgb), 0.18);
   border-radius: 999px;
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
@@ -429,7 +429,7 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.54);
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: rgba(67, 141, 99, 0.35) transparent;
+  scrollbar-color: rgba(var(--ui-primary-rgb), 0.35) transparent;
 }
 
 .activity-message {
@@ -452,7 +452,7 @@ onUnmounted(() => {
 }
 
 .activity-message.success {
-  border-color: rgba(67, 141, 99, 0.2);
+  border-color: rgba(var(--ui-primary-rgb), 0.2);
   color: #2e714b;
   background: rgba(228, 241, 231, 0.94);
 }
@@ -493,7 +493,7 @@ onUnmounted(() => {
 .activity-spinner {
   width: 43px;
   height: 43px;
-  border: 3px solid rgba(67, 141, 99, 0.18);
+  border: 3px solid rgba(var(--ui-primary-rgb), 0.18);
   border-top-color: var(--ui-primary);
   border-radius: 50%;
   animation: spin 0.85s linear infinite;

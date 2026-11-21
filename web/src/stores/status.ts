@@ -5,6 +5,7 @@ import { io } from 'socket.io-client'
 import { computed, ref } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import { useAccountStore } from '@/stores/account'
+import { useAppStore } from '@/stores/app'
 
 // Define interfaces for better type checking
 interface DailyGift {
@@ -63,6 +64,7 @@ export const useStatusStore = defineStore('status', () => {
 
   let socket: Socket | null = null
   let statusRequestSequence = 0
+  let logRequestSequence = 0
   let diamondRequestSequence = 0
 
   function normalizeStatusPayload(input: any) {
@@ -100,13 +102,16 @@ export const useStatusStore = defineStore('status', () => {
   }
 
   function handleRealtimeLog(payload: any) {
-    if (!realtimeLogsEnabled.value)
+    if (!realtimeLogsEnabled.value
+      || (currentRealtimeAccountId.value && currentRealtimeAccountId.value !== String(payload?.accountId || '')))
       return
     pushRealtimeLog(payload)
   }
 
   function handleRealtimeLogsSnapshot(payload: any) {
     const body = (payload && typeof payload === 'object') ? payload : {}
+    if (String(body.accountId || '') !== (currentRealtimeAccountId.value || 'all'))
+      return
     const list = Array.isArray(body.logs) ? body.logs : []
     logs.value = list.map((item: any) => normalizeLogEntry(item))
   }
@@ -126,12 +131,7 @@ export const useStatusStore = defineStore('status', () => {
 
     socket.on('connect', () => {
       realtimeConnected.value = true
-      if (currentRealtimeAccountId.value) {
-        socket?.emit('subscribe', { accountId: currentRealtimeAccountId.value })
-      }
-      else {
-        socket?.emit('subscribe', { accountId: 'all' })
-      }
+      socket?.emit('subscribe', { accountId: currentRealtimeAccountId.value || 'all' })
     })
 
     socket.on('disconnect', () => {
@@ -146,6 +146,10 @@ export const useStatusStore = defineStore('status', () => {
     socket.on('status:update', handleRealtimeStatus)
     socket.on('log:new', handleRealtimeLog)
     socket.on('logs:snapshot', handleRealtimeLogsSnapshot)
+    socket.on('appearance:update', (payload) => {
+      if (typeof payload?.brandColor === 'string')
+        useAppStore().applyBrand(payload.brandColor, payload.brandPreset)
+    })
     return socket
   }
 
@@ -155,7 +159,11 @@ export const useStatusStore = defineStore('status', () => {
     currentRealtimeAccountId.value = nextAccountId
     if (accountChanged) {
       statusRequestSequence++
+      logRequestSequence++
+      diamondRequestSequence++
+      diamondBalance.value = 0
       status.value = null
+      logs.value = []
       loading.value = false
       error.value = ''
     }
@@ -172,7 +180,8 @@ export const useStatusStore = defineStore('status', () => {
     }
 
     if (client.connected) {
-      client.emit('subscribe', { accountId: currentRealtimeAccountId.value || 'all' })
+      if (accountChanged)
+        client.emit('subscribe', { accountId: currentRealtimeAccountId.value || 'all' })
       return
     }
     client.connect()
@@ -187,6 +196,7 @@ export const useStatusStore = defineStore('status', () => {
     socket.off('status:update', handleRealtimeStatus)
     socket.off('log:new', handleRealtimeLog)
     socket.off('logs:snapshot', handleRealtimeLogsSnapshot)
+    socket.off('appearance:update')
     socket.disconnect()
     socket = null
     realtimeConnected.value = false
@@ -224,6 +234,7 @@ export const useStatusStore = defineStore('status', () => {
   async function fetchLogs(accountId: string, options: any = {}) {
     if (!accountId && options.accountId !== 'all')
       return
+    const sequence = ++logRequestSequence
     const params: any = { limit: 100, ...options }
     const headers: any = {}
     if (accountId && accountId !== 'all') {
@@ -235,7 +246,7 @@ export const useStatusStore = defineStore('status', () => {
 
     try {
       const { data } = await api.get('/api/logs', { headers, params })
-      if (data.ok) {
+      if (data.ok && sequence === logRequestSequence) {
         logs.value = data.data
         error.value = ''
       }

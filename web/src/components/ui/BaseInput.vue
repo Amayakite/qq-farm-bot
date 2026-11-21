@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { NInput } from 'naive-ui/es/input'
 import { NInputNumber } from 'naive-ui/es/input-number'
-import { computed, useAttrs } from 'vue'
+import { computed, useAttrs, useId } from 'vue'
 
 defineOptions({ inheritAttrs: false })
 
-defineProps<{
+const props = defineProps<{
+  id?: string
   type?: string
   placeholder?: string
   label?: string
+  autocomplete?: string
+  required?: boolean
   disabled?: boolean
   clearable?: boolean
   min?: string | number
@@ -22,6 +25,12 @@ const emit = defineEmits<{
 
 const attrs = useAttrs()
 const model = defineModel<string | number>()
+const generatedId = useId()
+const inputProps = computed(() => ({
+  id: props.id || (props.label ? generatedId : undefined),
+  autocomplete: props.autocomplete,
+  required: props.required,
+}))
 
 const textValue = computed({
   get: () => model.value === undefined || model.value === null ? '' : String(model.value),
@@ -45,13 +54,14 @@ const numberValue = computed<number | null>({
 
 <template>
   <div class="base-field">
-    <label v-if="label" class="base-field__label" :for="String(attrs.id || '')">
+    <label v-if="label" class="base-field__label" :for="inputProps.id">
       {{ label }}
     </label>
     <NInputNumber
       v-if="type === 'number'"
       v-model:value="numberValue"
       v-bind="attrs"
+      :input-props="inputProps"
       class="w-full"
       :placeholder="placeholder"
       :disabled="disabled"
@@ -65,6 +75,7 @@ const numberValue = computed<number | null>({
       v-else
       v-model:value="textValue"
       v-bind="attrs"
+      :input-props="inputProps"
       :type="type === 'password' ? 'password' : 'text'"
       :placeholder="placeholder"
       :disabled="disabled"

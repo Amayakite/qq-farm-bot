@@ -762,7 +762,7 @@ function openActivity(activity: ActivityDirectoryItemDto) {
 }
 
 .activity-entry--supported:hover {
-  border-color: rgba(67, 141, 99, 0.3);
+  border-color: rgba(var(--ui-primary-rgb), 0.3);
   box-shadow: var(--ui-shadow-md);
   transform: translateY(-1px);
 }
@@ -809,7 +809,7 @@ function openActivity(activity: ActivityDirectoryItemDto) {
 
 .activity-entry__status {
   padding: 3px 8px;
-  border: 1px solid rgba(67, 141, 99, 0.18);
+  border: 1px solid rgba(var(--ui-primary-rgb), 0.18);
   border-radius: 999px;
   color: var(--ui-primary);
   background: var(--ui-primary-soft);

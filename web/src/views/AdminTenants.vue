@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import api, { getApiErrorMessage } from '@/api'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
@@ -44,7 +45,9 @@ interface GeneratedCode {
 }
 
 const toast = useToastStore()
-const activeTab = ref<'tenants' | 'codes'>('tenants')
+const route = useRoute()
+const initialTab = route.query.tab === 'codes' ? 'codes' : 'tenants'
+const activeTab = ref<'tenants' | 'codes'>(initialTab)
 const loading = ref(false)
 const tenants = ref<Tenant[]>([])
 const codes = ref<CodeRecord[]>([])
@@ -337,6 +340,10 @@ async function revokeCode(code: CodeRecord) {
   }
 }
 
+watch(() => route.query.tab, (value) => {
+  activeTab.value = value === 'codes' ? 'codes' : 'tenants'
+})
+
 onMounted(reload)
 </script>
 
@@ -344,10 +351,7 @@ onMounted(reload)
   <div class="admin-page space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h2 class="text-lg text-gray-900 font-bold dark:text-gray-100">
-          用户与激活码
-        </h2>
-        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        <p class="text-xs text-gray-500 dark:text-gray-400">
           管理租户有效期、账号配额和卡密批次。激活码只在生成时展示一次。
         </p>
       </div>
@@ -737,7 +741,7 @@ onMounted(reload)
 
 .generated-box {
   padding: 14px;
-  border: 1px solid rgba(67, 141, 99, 0.2);
+  border: 1px solid rgba(var(--ui-primary-rgb), 0.2);
   border-radius: 10px;
   background: var(--ui-primary-soft);
 }

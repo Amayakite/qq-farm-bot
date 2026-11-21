@@ -6,6 +6,15 @@ export {};
 const path = require('node:path');
 const fs = require('node:fs');
 
+// Load the project's configuration before importing modules that read process.env.
+// Workers inherit the manager's environment.
+const isWorkerProcess = process.env.FARM_WORKER === '1';
+if (!isWorkerProcess && typeof process.loadEnvFile === 'function') {
+    const envDir = (process as any).pkg ? path.dirname(process.execPath) : path.join(__dirname, '..');
+    const envFile = path.join(envDir, '.env');
+    if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
+}
+
 // tsx/bun 直接跑 client.ts 时用 src，避免 stale dist 缺新路由。
 // node client.js / 打包产物仍优先加载已编译的 dist。
 const runningFromSource = /\.[cm]?tsx?$/.test(__filename);
@@ -23,7 +32,6 @@ const { createModuleLogger } = require(`${baseDir}/services/logger`);
 const mainLogger = createModuleLogger('main');
 
 // 打包后 worker 由当前可执行文件以 --worker 模式启动
-const isWorkerProcess: boolean = process.env.FARM_WORKER === '1';
 if (isWorkerProcess) {
     require(`${baseDir}/core/worker`);
 } else {

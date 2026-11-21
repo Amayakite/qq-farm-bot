@@ -954,7 +954,7 @@ function markMutantIconFailed(effect: any) {
   background: #e7e9e6;
 }
 .land-harvestable {
-  border-color: rgba(67, 141, 99, 0.48);
+  border-color: rgba(var(--ui-primary-rgb), 0.48);
   box-shadow:
     inset 0 3px 0 var(--ui-primary),
     var(--ui-shadow-sm);

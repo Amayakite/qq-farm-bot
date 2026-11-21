@@ -24,6 +24,7 @@ const userStore = useUserStore()
 const publicConfig = usePublicConfigStore()
 const route = useRoute()
 const router = useRouter()
+const isAdminRoute = computed(() => String(route.path || '').startsWith('/admin'))
 const isDesktop = useMediaQuery('(min-width: 1024px)')
 const { accounts, currentAccount } = storeToRefs(accountStore)
 const { status, realtimeConnected } = storeToRefs(statusStore)
@@ -253,6 +254,14 @@ const displayName = computed(() => {
 })
 
 const connectionStatus = computed(() => {
+  if (isAdminRoute.value) {
+    return {
+      text: systemConnected.value ? '服务在线' : '系统离线',
+      color: systemConnected.value ? 'bg-green-500' : 'bg-red-500',
+      pulse: false,
+    }
+  }
+
   if (!systemConnected.value) {
     return {
       text: '系统离线',
@@ -285,14 +294,35 @@ const connectionStatus = computed(() => {
   }
 })
 
-const navItems = computed(() => {
-  return getSpaceMenu(route.meta.gameSpace === 'ranch')
+const navGroups = computed(() => {
+  const inRanch = route.meta.gameSpace === 'ranch'
+  const items = getSpaceMenu(inRanch)
     .filter(item => !item.meta?.ownerOnly || userStore.isOwner)
+    .filter(item => !item.meta?.tenantOnly || userStore.isTenant)
+    .filter(item => !item.meta?.tenantHidden || userStore.isOwner)
     .map(item => ({
+      name: item.name,
       path: item.path ? `/${item.path}` : '/',
-      label: item.label,
+      label: item.name === 'Settings' && userStore.isOwner ? '系统设置' : item.label,
       icon: item.icon,
+      group: item.meta?.group,
     }))
+
+  if (inRanch)
+    return [{ key: 'game', label: '', items }]
+
+  if (!userStore.isOwner) {
+    const settings = items.filter(item => item.name === 'Settings')
+    const rest = items.filter(item => item.name !== 'Settings')
+    return [{ key: 'main', label: '', items: [...rest, ...settings] }]
+  }
+
+  const admin = items.filter(item => item.group === 'admin' || item.name === 'Settings')
+  const game = items.filter(item => item.group === 'game')
+  return [
+    { key: 'admin', label: '管理', items: admin },
+    { key: 'game', label: '游戏控制台', items: game },
+  ].filter(group => group.items.length > 0)
 })
 
 function selectAccount(acc: any) {
@@ -321,6 +351,16 @@ async function handleLogout() {
 function goToAdmin() {
   showUserDropdown.value = false
   router.push('/admin/tenants')
+}
+
+function goToAdminHome() {
+  showUserDropdown.value = false
+  router.push('/admin')
+}
+
+function goToAppearance() {
+  showUserDropdown.value = false
+  router.push('/admin/appearance')
 }
 
 function goToRenew() {
@@ -359,11 +399,11 @@ async function copyToken() {
           <div class="sidebar-brand__identity min-w-0 flex items-center gap-2.5">
             <BrandMark class="brand-mark" :size="28" />
             <span v-show="!isSidebarCollapsed" class="min-w-0 truncate text-sm font-display font-semibold">
-              QQ{{ route.meta.gameSpace === 'ranch' ? '牧场' : '农场' }}智能助手
+              {{ publicConfig.siteName }}
             </span>
           </div>
         </template>
-        QQ{{ route.meta.gameSpace === 'ranch' ? '牧场' : '农场' }}智能助手
+        {{ publicConfig.siteName }}
       </NTooltip>
       <!-- Mobile Close Button -->
       <NButton
@@ -466,10 +506,28 @@ async function copyToken() {
               v-if="userStore.isOwner"
               class="sidebar-menu-button"
               quaternary block
+              @click="goToAdminHome"
+            >
+              <div class="i-carbon-dashboard" />
+              <span>管理概览</span>
+            </NButton>
+            <NButton
+              v-if="userStore.isOwner"
+              class="sidebar-menu-button"
+              quaternary block
               @click="goToAdmin"
             >
               <div class="i-carbon-user-admin" />
               <span>用户与激活码</span>
+            </NButton>
+            <NButton
+              v-if="userStore.isOwner"
+              class="sidebar-menu-button"
+              quaternary block
+              @click="goToAppearance"
+            >
+              <div class="i-carbon-color-palette" />
+              <span>外观设置</span>
             </NButton>
             <NButton
               v-if="userStore.isTenant"
@@ -496,7 +554,7 @@ async function copyToken() {
     </div>
 
     <!-- Account Selector -->
-    <div class="sidebar-section border-b border-gray-200/40 p-4 dark:border-gray-700/40">
+    <div v-if="!isAdminRoute" class="sidebar-section border-b border-gray-200/40 p-4 dark:border-gray-700/40">
       <div class="group relative">
         <NTooltip
           :disabled="!isSidebarCollapsed || showAccountDropdown"
@@ -514,7 +572,7 @@ async function copyToken() {
               @click="toggleAccountDropdown"
             >
               <div class="flex items-center gap-3 overflow-hidden">
-                <div class="h-8 w-8 flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-gray-200 shadow-sm ring-2 ring-green-300/50 dark:bg-gray-600 dark:ring-green-700/50">
+                <div class="account-avatar-ring h-8 w-8 flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-gray-200 shadow-sm dark:bg-gray-600">
                   <img
                     v-if="canShowAccountAvatar(currentAccount)"
                     :src="getAccountAvatar(currentAccount)"
@@ -629,7 +687,7 @@ async function copyToken() {
 
       <!-- Re-login prompt when account is stopped/disconnected -->
       <button
-        v-if="connectionStatus.text === '未连接'"
+        v-if="!isAdminRoute && connectionStatus.text === '未连接'"
         type="button"
         class="sidebar-relogin-btn mt-2 w-full flex items-center gap-2 rounded-xl px-3 py-2 text-sm transition-colors font-medium"
         @click="accountToEdit = currentAccount; showAccountModal = true; showAccountDropdown = false"
@@ -641,32 +699,38 @@ async function copyToken() {
 
     <!-- Navigation -->
     <nav class="sidebar-nav flex-1 overflow-y-auto px-3 py-4 space-y-1">
-      <NTooltip
-        v-for="item in navItems"
-        :key="item.path"
-        :disabled="!isSidebarCollapsed"
-        placement="right"
-        :show-arrow="false"
-        :theme-overrides="sidebarTooltipTheme"
-      >
-        <template #trigger>
-          <router-link
-            :to="item.path"
-            class="sidebar-nav__link group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150"
-            :active-class="item.path === '/' ? '' : 'font-medium'"
-            :style="{
-              color: 'var(--theme-text)',
-              opacity: '0.85',
-            }"
-            :data-nav="item.path"
-            :aria-label="isSidebarCollapsed ? item.label : undefined"
-          >
-            <span class="nav-icon" :class="item.icon" />
-            <span v-show="!isSidebarCollapsed" class="font-body">{{ item.label }}</span>
-          </router-link>
-        </template>
-        {{ item.label }}
-      </NTooltip>
+      <template v-for="group in navGroups" :key="group.key">
+        <div v-if="group.label" class="sidebar-nav__group">
+          <span v-show="!isSidebarCollapsed">{{ group.label }}</span>
+          <span v-show="isSidebarCollapsed" class="sidebar-nav__divider" />
+        </div>
+        <NTooltip
+          v-for="item in group.items"
+          :key="item.path"
+          :disabled="!isSidebarCollapsed"
+          placement="right"
+          :show-arrow="false"
+          :theme-overrides="sidebarTooltipTheme"
+        >
+          <template #trigger>
+            <router-link
+              :to="item.path"
+              class="sidebar-nav__link group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150"
+              :active-class="item.path === '/' ? '' : 'font-medium'"
+              :style="{
+                color: 'var(--theme-text)',
+                opacity: '0.85',
+              }"
+              :data-nav="item.path"
+              :aria-label="isSidebarCollapsed ? item.label : undefined"
+            >
+              <span class="nav-icon" :class="item.icon" />
+              <span v-show="!isSidebarCollapsed" class="font-body">{{ item.label }}</span>
+            </router-link>
+          </template>
+          {{ item.label }}
+        </NTooltip>
+      </template>
     </nav>
 
     <!-- Token Display (All Users) -->
@@ -959,6 +1023,25 @@ async function copyToken() {
   background: color-mix(in srgb, var(--ui-surface-strong) 82%, transparent);
 }
 
+.sidebar-nav__group {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 10px 10px 4px;
+  color: var(--ui-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar-nav__divider {
+  width: 18px;
+  height: 1px;
+  border-radius: 1px;
+  background: var(--ui-border);
+}
+
 .sidebar-control:focus-visible,
 .sidebar-token__trigger:focus-visible,
 .sidebar-nav__link:focus-visible,
@@ -1068,7 +1151,7 @@ nav a:hover {
   background: var(--ui-primary-soft) !important;
   color: var(--ui-primary) !important;
   font-weight: var(--fw-600);
-  box-shadow: inset 0 0 0 1px rgba(67, 141, 99, 0.13) !important;
+  box-shadow: inset 0 0 0 1px rgba(var(--ui-primary-rgb), 0.13) !important;
   border-radius: 8px;
   opacity: 1 !important;
 }
@@ -1081,7 +1164,7 @@ nav a:hover {
   background: var(--ui-primary-soft) !important;
   color: var(--ui-primary) !important;
   font-weight: var(--fw-600);
-  box-shadow: inset 0 0 0 1px rgba(67, 141, 99, 0.13) !important;
+  box-shadow: inset 0 0 0 1px rgba(var(--ui-primary-rgb), 0.13) !important;
   border-radius: 8px;
   opacity: 1 !important;
 }
@@ -1106,6 +1189,10 @@ nav a:hover {
 
 .farm-avatar-ring:hover {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--theme-primary) 18%, transparent);
+}
+
+.account-avatar-ring {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-primary) 42%, transparent);
 }
 
 .admin-badge {

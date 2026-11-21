@@ -7,10 +7,12 @@ import { NPopover } from 'naive-ui/es/popover'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import AccountModal from '@/components/AccountModal.vue'
 import CareerHarvestSteal from '@/components/CareerHarvestSteal.vue'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import LandCard from '@/components/FarmLandCard.vue'
 import LandDetailModal from '@/components/LandDetailModal.vue'
+import TourGuide from '@/components/onboarding/TourGuide.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import { useAccountStore } from '@/stores/account'
@@ -18,11 +20,15 @@ import { useFarmStore } from '@/stores/farm'
 import { useSettingStore } from '@/stores/setting'
 import { useStatusStore } from '@/stores/status'
 import { useToastStore } from '@/stores/toast'
+import { useUserStore } from '@/stores/user'
 import { interactionItemTargetReason } from '@/utils/interaction-item-rules'
 
 const farmStore = useFarmStore()
 const accountStore = useAccountStore()
 const settingStore = useSettingStore()
+const userStore = useUserStore()
+const showAccountModal = ref(false)
+const startingAccount = ref(false)
 const statusStore = useStatusStore()
 const toast = useToastStore()
 const route = useRoute()
@@ -341,12 +347,32 @@ function interactionFailures() {
   return results.filter(result => !result.ok)
 }
 
+async function startCurrentAccount() {
+  const id = String(currentAccountId.value || '')
+  if (!id || startingAccount.value)
+    return
+  startingAccount.value = true
+  try {
+    await accountStore.startAccount(id)
+  }
+  finally {
+    startingAccount.value = false
+  }
+}
+
 const summaryItems = computed(() => [
   { key: 'harvestable', label: '可收', icon: 'i-carbon-wheat text-amber-600 dark:text-amber-400', value: Number(summary.value?.harvestable) || 0 },
   { key: 'growing', label: '生长', icon: 'i-carbon-sprout text-green-600 dark:text-green-400', value: Number(summary.value?.growing) || 0 },
   { key: 'empty', label: '空闲', icon: 'text-gray-500', path: 'M12 4 22 9 12 14 2 9 12 4ZM2 14l10 5 10-5', value: Number(summary.value?.empty) || 0 },
   { key: 'dead', label: '枯萎', icon: 'text-red-600 dark:text-red-400', path: 'M12 21V11c0-4-2-6-5-6M7 5c-3 0-4 2-4 5 3 0 5-1 5-4M12 15c0-3 2-5 5-5m0 0c3 0 4 2 4 5-3 0-5-1-5-4M8 21h8', value: Number(summary.value?.dead) || 0 },
 ])
+
+const farmTourSteps = [
+  { selector: '[data-tour="farm-summary"]', title: '土地状态', body: '这里显示可收、生长、空闲和枯萎的土地数量。首页也会提示可收获数量。' },
+  { selector: '[data-tour="farm-actions"]', title: '一键操作', body: '「一键全收」会处理收获、除草和种植；其他按钮可以分别执行。' },
+  { selector: '[data-tour="farm-mobile-actions"]', title: '一键操作', body: '打开「土地概况与操作」查看土地状态及一键操作，也可以直接进入批量操作。' },
+  { selector: '[data-tour="farm-land-grid"]', title: '土地网格', body: '点击任意地块查看作物、成熟时间和操作详情。' },
+]
 
 // 列数取土地数量的因数，让每一行都排满：24 块地可排成 8×3、6×4、4×6 等。
 // 在卡片宽度落在合适区间的因数里取最大的；没有合适的因数（比如质数块数）时按宽度自然换行。
@@ -620,7 +646,7 @@ onUnmounted(() => {
           <h3 class="flex items-center gap-2 text-lg font-bold">
             <span class="i-carbon-sprout text-green-600" /> 土地详情
           </h3>
-          <div class="farm-mobile-actions">
+          <div class="farm-mobile-actions" data-tour="farm-mobile-actions">
             <NButton size="small" :type="selecting ? 'default' : 'primary'" :secondary="!selecting" :disabled="selectionBusy || !currentAccountRunning || !loaded || !!error" @click="selecting ? exitSelecting() : enterSelecting()">
               {{ selecting ? '退出选择' : '批量操作' }}
             </NButton>
@@ -667,7 +693,7 @@ onUnmounted(() => {
             </template>
           </NButton>
         </div>
-        <div class="farm-actions" :class="{ 'is-selecting': selecting }">
+        <div class="farm-actions" :class="{ 'is-selecting': selecting }" data-tour="farm-actions">
           <NButton :type="selecting ? 'default' : 'primary'" :secondary="!selecting" :disabled="selectionBusy || !currentAccountRunning || !loaded || !!error" @click="selecting ? exitSelecting() : enterSelecting()">
             <span class="i-carbon-checkbox-checked" />
             {{ selecting ? '退出选择' : '批量操作' }}
@@ -694,7 +720,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Summary：左侧是当前土地状态，右侧是生涯数据；颜色只留给图标 -->
-      <div class="farm-summary shrink-0 border-b border-gray-100 px-4 py-3 dark:border-gray-700 sm:px-5">
+      <div class="farm-summary shrink-0 border-b border-gray-100 px-4 py-3 dark:border-gray-700 sm:px-5" data-tour="farm-summary">
         <div class="farm-summary__states">
           <span v-for="item in summaryItems" :key="item.key" class="farm-state" :class="{ 'is-zero': item.value === 0 }">
             <svg v-if="item.path" :class="item.icon" class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -728,9 +754,17 @@ onUnmounted(() => {
             <div class="i-svg-spinners-90-ring-with-bg text-4xl text-green-500" />
           </div>
 
-          <EmptyState v-else-if="!currentAccountId" bare title="请先选择账号" description="添加并选择账号后查看土地" icon="i-carbon-user-avatar" />
+          <EmptyState v-else-if="!currentAccountId" bare title="还没有游戏账号" description="添加账号后，这里会显示土地、作物和收获操作。" icon="i-carbon-sprout">
+            <NButton type="primary" size="small" @click="showAccountModal = true">
+              添加游戏账号
+            </NButton>
+          </EmptyState>
 
-          <EmptyState v-else-if="!currentAccountRunning" bare title="账号未运行" description="启动账号后会立即读取土地" icon="i-carbon-connection-signal-off" />
+          <EmptyState v-else-if="!currentAccountRunning" bare title="账号未运行" description="启动账号后会立即读取土地" icon="i-carbon-connection-signal-off">
+            <NButton type="primary" size="small" :loading="startingAccount" @click="startCurrentAccount">
+              启动账号
+            </NButton>
+          </EmptyState>
 
           <EmptyState v-else-if="error" bare tone="error" title="土地读取失败" :description="error" icon="i-carbon-warning-alt">
             <NButton secondary @click="refreshFarm">
@@ -803,7 +837,7 @@ onUnmounted(() => {
                 好友放置了 {{ cleanableFarmSocialEventNames }}，可一键务农，或选择土地后务农清理。
               </span>
             </div>
-            <div ref="gridEl" class="farm-grid" :class="{ 'is-selecting': selecting }" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }">
+            <div ref="gridEl" class="farm-grid" :class="{ 'is-selecting': selecting }" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }" data-tour="farm-land-grid">
               <LandCard
                 v-for="land in lands"
                 :key="land.id"
@@ -821,6 +855,18 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <TourGuide
+      :storage-key="`tour_farm_v1:${userStore.userInfo?.id || 'guest'}`"
+      :enabled="userStore.isTenant && currentAccountConnected && loaded && !error && lands.length > 0"
+      :steps="farmTourSteps"
+    />
+
+    <AccountModal
+      :show="showAccountModal"
+      @close="showAccountModal = false"
+      @saved="showAccountModal = false; accountStore.fetchAccounts()"
+    />
 
     <LandDetailModal :land="detailLand" :player="status?.status" :connected="currentAccountConnected" @close="detailLandId = null" />
 

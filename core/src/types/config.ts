@@ -114,6 +114,10 @@ export interface OfflineReminder {
 
 export interface UIConfig {
   theme: 'light' | 'dark';
+  /** 全局品牌主色（#rrggbb），由 owner 统一配置。 */
+  brandColor: string;
+  /** 预设标识；自定义颜色时为 custom。 */
+  brandPreset: string;
 }
 
 export interface LoginSettings {

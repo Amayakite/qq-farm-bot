@@ -99,7 +99,7 @@ router.beforeEach(async (to, _from) => {
     if (to.name === 'login' && adminToken.value) {
       const valid = await ensureTokenValid()
       if (valid)
-        return useUserStore().userInfo?.mustChangePassword ? true : { name: 'dashboard' }
+        return useUserStore().userInfo?.mustChangePassword ? true : useUserStore().homePath
       adminToken.value = ''
       validatedToken = ''
       if (lastAuthErrorType)
@@ -120,16 +120,12 @@ router.beforeEach(async (to, _from) => {
     return authFailureRoute()
   }
 
-  if (useUserStore().userInfo?.mustChangePassword)
+  const userStore = useUserStore()
+  if (userStore.userInfo?.mustChangePassword)
     return { name: 'login' }
 
-  if (to.meta.ownerOnly) {
-    const userStore = useUserStore()
-    if (!userStore.userInfo)
-      await userStore.fetchUserInfo()
-    if (!userStore.isOwner)
-      return { name: 'dashboard' }
-  }
+  if ((to.meta.ownerOnly && !userStore.isOwner) || (to.meta.tenantOnly && userStore.isOwner))
+    return userStore.homePath
 
   return true
 })
