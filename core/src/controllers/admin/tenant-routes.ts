@@ -157,6 +157,31 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         res.json({ ok: true, data: list });
     });
 
+    app.get('/api/admin/codes/:id/value', (req: Request, res: Response) => {
+        try {
+            const result = codeStore.revealCode(req.params.id);
+            if (!result.ok) {
+                return res.status(result.error === 'not_found' ? 404 : 409)
+                    .json({ ok: false, error: result.message, errorType: result.error });
+            }
+            tenantLogger.info('读取完整激活码', { id: req.params.id });
+            return res.json({ ok: true, data: { code: result.code } });
+        } catch (e: any) {
+            return handleApiError(res, e);
+        }
+    });
+
+    app.get('/api/admin/codes/batch/:batchId/values', (req: Request, res: Response) => {
+        try {
+            const result = codeStore.revealBatch(req.params.batchId);
+            if (!result.ok) return res.status(404).json({ ok: false, error: result.message, errorType: result.error });
+            tenantLogger.info('读取批次待兑换码', { batchId: req.params.batchId, count: result.codes.length });
+            return res.json({ ok: true, data: result });
+        } catch (e: any) {
+            return handleApiError(res, e);
+        }
+    });
+
     app.post('/api/admin/codes', (req: Request, res: Response) => {
         try {
             const body = req.body || {};
@@ -165,11 +190,42 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
                 days: body.days,
                 type: body.type,
                 maxAccounts: body.maxAccounts !== undefined ? body.maxAccounts : CONFIG.defaultMaxAccounts,
-                redeemBefore: body.redeemBefore ? Number(body.redeemBefore) : null,
+                redeemBefore: body.redeemBefore,
                 note: body.note,
+                targetTenantId: body.targetTenantId,
                 createdBy: 'owner',
             });
+            if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
             tenantLogger.info('生成激活码', { batchId: result.batchId, count: result.codes.length, type: body.type, days: body.days });
+            return res.json({ ok: true, data: result });
+        } catch (e: any) {
+            return handleApiError(res, e);
+        }
+    });
+
+    app.put('/api/admin/codes/:id', (req: Request, res: Response) => {
+        try {
+            const { days, maxAccounts, redeemBefore, note, targetTenantId } = req.body || {};
+            const result = codeStore.updateCode(req.params.id, { days, maxAccounts, redeemBefore, note, targetTenantId });
+            if (!result.ok) {
+                const status = result.error === 'not_found' ? 404 : result.error === 'terms_locked' ? 409 : 400;
+                return res.status(status).json({ ok: false, error: result.message, errorType: result.error });
+            }
+            tenantLogger.info('修改激活码', { id: req.params.id });
+            return res.json({ ok: true, data: result.code });
+        } catch (e: any) {
+            return handleApiError(res, e);
+        }
+    });
+
+    app.post('/api/admin/codes/:id/replace', (req: Request, res: Response) => {
+        try {
+            const result = codeStore.replaceCode(req.params.id, 'owner');
+            if (!result.ok) {
+                const status = result.error === 'not_found' ? 404 : 409;
+                return res.status(status).json({ ok: false, error: result.message, errorType: result.error });
+            }
+            tenantLogger.warn('换发激活码', { id: req.params.id, replacementId: result.codes[0].id, batchId: result.batchId });
             return res.json({ ok: true, data: result });
         } catch (e: any) {
             return handleApiError(res, e);

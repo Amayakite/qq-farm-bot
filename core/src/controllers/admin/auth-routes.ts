@@ -181,7 +181,11 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
         }
 
         const record = validation.record;
-        const extended = userStore.extendTenant(credential.user.id, record.days, { codeId: record.id, maxAccounts: record.maxAccounts });
+        const extended = userStore.extendTenant(credential.user.id, record.days, {
+            codeId: record.id,
+            maxAccounts: record.maxAccounts,
+            targetTenantId: record.targetTenantId,
+        });
         if (!extended.ok) {
             return res.status(400).json({ ok: false, error: extended.message, errorType: extended.error });
         }

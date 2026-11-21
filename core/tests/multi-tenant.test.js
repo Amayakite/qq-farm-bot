@@ -201,6 +201,90 @@ test('租户与激活码核销同时提交，写盘失败后可重试', () => {
     assert.equal(codes.validateCode(code.code, 'new').error, 'used_code');
 });
 
+test('未兑换激活码可修改权益并换发，旧码失效且保留同批次关系', () => {
+    const dir = tempDir();
+    const codes = loadCodeStore(dir);
+    const issued = codes.generateCodes({ type: 'new', count: 1, days: 30, maxAccounts: 3 });
+    const original = issued.codes[0];
+    assert.equal(codes.updateCode(original.id, { redeemBefore: Date.now() - 1 }).error, 'invalid_deadline');
+    assert.equal(codes.updateCode(original.id, { targetTenantId: 'sample' }).error, 'invalid_target');
+    assert.equal(codes.updateCode(original.id, { days: 12.5 }).error, 'invalid_days');
+    assert.equal(codes.updateCode(original.id, { days: 45, maxAccounts: 7, note: '预留' }).ok, true);
+    const replacement = codes.replaceCode(original.id, 'owner');
+    assert.equal(replacement.ok, true);
+    assert.equal(replacement.batchId, issued.batchId);
+    const reloaded = loadCodeStore(dir);
+    assert.equal(reloaded.validateCode(original.code, 'new').error, 'revoked_code');
+    assert.equal(reloaded.replaceCode(original.id, 'owner').error, 'already_replaced');
+    const next = reloaded.validateCode(replacement.codes[0].code, 'new').record;
+    assert.equal(next.days, 45);
+    assert.equal(next.maxAccounts, 7);
+    assert.equal(next.note, '预留');
+    assert.equal(next.replacesId, original.id);
+    const listed = reloaded.listCodes({ batchId: issued.batchId });
+    assert.equal(listed.find(record => record.id === original.id).replacedBy, next.id);
+    assert.ok(listed.every(record => record.hasFullCode && !Object.hasOwn(record, 'code') && !Object.hasOwn(record, 'codeHash') && !Object.hasOwn(record, 'encryptedCode')));
+    assert.equal(reloaded.revealCode(original.id).code, original.code);
+    assert.equal(reloaded.revealCode(next.id).code, replacement.codes[0].code);
+    const batch = reloaded.revealBatch(issued.batchId);
+    assert.equal(batch.codes.length, 1);
+    assert.equal(batch.codes[0].id, next.id);
+    const saved = fs.readFileSync(path.join(dir, 'activation-codes.json'), 'utf8');
+    for (const { code } of [original, replacement.codes[0]]) {
+        assert.equal(saved.includes(code), false);
+        assert.equal(saved.includes(code.replaceAll('-', '')), false);
+    }
+});
+
+test('旧版哈希码保留兑换能力，换发后可读取密文；已有密文时不会重建丢失的密钥', () => {
+    const dir = tempDir();
+    const original = 'QF-AAAA-BBBB-CCCC-DDDD';
+    const codeHash = require('node:crypto').createHash('sha256').update(original.replaceAll('-', '')).digest('hex');
+    fs.writeFileSync(path.join(dir, 'activation-codes.json'), JSON.stringify({
+        codes: [{ id: 'legacy', codeHash, codeHint: 'DDDD', type: 'new', batchId: 'legacy-batch' }],
+    }));
+    const codes = loadCodeStore(dir);
+    assert.equal(codes.validateCode(original, 'new').ok, true);
+    assert.equal(codes.revealCode('legacy').error, 'full_code_unavailable');
+    assert.equal(codes.revealBatch('legacy-batch').unavailable, 1);
+    const replacement = codes.replaceCode('legacy', 'owner').codes[0];
+    const key = path.join(dir, 'activation-code-key');
+    if (process.platform !== 'win32') assert.equal(fs.statSync(key).mode & 0o777, 0o600);
+    assert.equal(loadCodeStore(dir).revealCode(replacement.id).code, replacement.code);
+    fs.unlinkSync(key);
+    const reloaded = loadCodeStore(dir);
+    assert.throws(() => reloaded.revealCode(replacement.id), /密钥文件缺失/);
+    assert.throws(() => reloaded.generateCodes({ count: 1 }), /密钥文件缺失/);
+    assert.equal(reloaded.validateCode(replacement.code, 'new').ok, true);
+    assert.equal(fs.existsSync(key), false);
+});
+
+test('指定租户续费码仅由目标租户兑换，核销后保留原权益和兑换人', () => {
+    const dir = tempDir();
+    const users = loadUserStore(dir);
+    const makeTenant = username => users.createTenant({
+        username, password: 'tenant-pass7', expiresAt: Date.now() + 60_000, maxAccounts: 2,
+    }).user;
+    const tenant = makeTenant('renew_owner');
+    const other = makeTenant('other_tenant');
+    const codes = loadCodeStore(dir, users);
+    const batch = codes.generateCodes({ type: 'renew', count: 2, days: 14, maxAccounts: 4, targetTenantId: tenant.id });
+    const code = batch.codes[0];
+    const terms = { codeId: code.id, maxAccounts: code.maxAccounts, targetTenantId: code.targetTenantId };
+    assert.equal(users.extendTenant(other.id, code.days, terms).error, 'wrong_tenant');
+    assert.equal(users.getUserById(other.id).expiresAt, other.expiresAt);
+    assert.equal(codes.validateCode(code.code, 'renew').ok, true);
+    const extended = users.extendTenant(tenant.id, code.days, terms);
+    assert.equal(extended.user.expiresAt, tenant.expiresAt + 14 * 86_400_000);
+    assert.equal(extended.user.maxAccounts, 4);
+    assert.equal(codes.updateCode(code.id, { days: 365 }).error, 'terms_locked');
+    assert.equal(codes.updateCode(code.id, { note: '已核对' }).code.redeemedBy, tenant.id);
+    assert.equal(codes.replaceCode(code.id, 'owner').error, 'already_redeemed');
+    assert.equal(codes.revokeBatch(batch.batchId).revoked, 1);
+    assert.equal(codes.validateCode(code.code, 'renew').error, 'used_code');
+    assert.equal(codes.validateCode(batch.codes[1].code, 'renew').error, 'revoked_code');
+});
+
 test('登录失败的锁定在进程重启后保留，且按客户端来源隔离', () => {
     const dir = tempDir();
     const users = loadUserStore(dir);
