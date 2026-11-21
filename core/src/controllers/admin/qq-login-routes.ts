@@ -6,7 +6,13 @@ export {};
 const { resolveAuthContext } = require('./middleware');
 
 const TASK_TTL_MS = 5 * 60_000;
-const taskOwners = new Map<string, { token: string; timer: NodeJS.Timeout }>();
+interface LoginTaskOwner {
+    token: string;
+    timer: NodeJS.Timeout;
+    expiresAt: number;
+    operation?: 'code' | 'cancel';
+}
+const taskOwners = new Map<string, LoginTaskOwner>();
 let creating = false; // The configured NapCat instance only handles one login workflow at a time.
 
 function forgetTask(id: string): void {
@@ -15,13 +21,19 @@ function forgetTask(id: string): void {
     taskOwners.delete(id);
 }
 
-function checkTaskOwner(req: Request, res: Response, taskId: unknown): boolean {
+function finishTaskOperation(id: string, owner: LoginTaskOwner): void {
+    owner.operation = undefined;
+    if (owner.expiresAt <= Date.now() && taskOwners.get(id) === owner) forgetTask(id);
+}
+
+function findOwnedTask(req: Request, res: Response): LoginTaskOwner | null {
     const token = (req as any).adminToken;
-    if (!token || taskOwners.get(String(taskId || ''))?.token !== token) {
+    const task = taskOwners.get(String(req.params.taskId || ''));
+    if (!token || !task || task.token !== token) {
         res.status(404).json({ ok: false, error: 'Login task not found or expired' });
-        return false;
+        return null;
     }
-    return true;
+    return task;
 }
 
 function publicTask(task: any) {
@@ -40,11 +52,13 @@ function sendError(res: Response, error: any, fallback: string): void {
     });
 }
 
+function channelBusy(res: Response) {
+    return res.status(409).json({ ok: false, errorType: 'qq_login_busy', error: '扫码通道正在使用，空闲后可获取二维码' });
+}
+
 function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
     app.post('/api/qq-login/tasks', async (req: Request, res: Response) => {
-        if (creating || taskOwners.size) {
-            return res.status(409).json({ ok: false, error: 'QQ 登录工作流繁忙，请稍后重试' });
-        }
+        if (creating || taskOwners.size) return channelBusy(res);
         creating = true;
         const token = (req as any).adminToken;
         try {
@@ -58,12 +72,15 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
             }
             const expiresAtMs = task.expiresAt < 1e12 ? task.expiresAt * 1000 : task.expiresAt;
             const ttl = expiresAtMs > Date.now() ? Math.min(expiresAtMs - Date.now(), TASK_TTL_MS) : TASK_TTL_MS;
-            const timer = setTimeout(() => forgetTask(task.taskId), ttl);
+            const timer = setTimeout(() => {
+                if (!taskOwners.get(task.taskId)?.operation) forgetTask(task.taskId);
+            }, ttl);
             timer.unref();
-            taskOwners.set(task.taskId, { token, timer });
+            taskOwners.set(task.taskId, { token, timer, expiresAt: Date.now() + ttl });
             res.json({ ok: true, data: publicTask(task) });
         }
         catch (error: any) {
+            if (!res.destroyed && error?.code === 'WORKFLOW_BUSY') return channelBusy(res);
             if (!res.destroyed) sendError(res, error, 'QQ 登录任务创建失败');
         }
         finally {
@@ -73,11 +90,12 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
 
     app.post('/api/qq-login/tasks/:taskId/status', async (req: Request, res: Response) => {
         try {
-            if (!checkTaskOwner(req, res, req.params.taskId)) return;
+            if (!findOwnedTask(req, res)) return;
             const task = await queryLoginStatus(String(req.params.taskId || ''));
-            if (!checkTaskOwner(req, res, req.params.taskId)) return;
+            const owner = findOwnedTask(req, res);
+            if (!owner) return;
             if (!resolveAuthContext(ctx, (req as any).adminToken).auth) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-            if (['cancelled', 'expired', 'failed'].includes(task.status)) forgetTask(task.taskId);
+            if (!owner.operation && ['cancelled', 'expired', 'failed'].includes(task.status)) forgetTask(task.taskId);
             res.json({ ok: true, data: publicTask(task) });
         }
         catch (error: any) {
@@ -86,28 +104,41 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
     });
 
     app.post('/api/qq-login/tasks/:taskId/code', async (req: Request, res: Response) => {
+        const owner = findOwnedTask(req, res);
+        if (!owner) return;
+        if (owner.operation) return res.status(409).json({ ok: false, error: '扫码任务正在处理，请稍候' });
+        const taskId = String(req.params.taskId || '');
+        owner.operation = 'code';
         try {
-            if (!checkTaskOwner(req, res, req.params.taskId)) return;
-            const result = await getMiniappCode(String(req.params.taskId || ''));
-            if (!checkTaskOwner(req, res, req.params.taskId)) return;
-            forgetTask(String(req.params.taskId || ''));
+            const result = await getMiniappCode(taskId);
+            forgetTask(taskId);
             if (!resolveAuthContext(ctx, (req as any).adminToken).auth) return res.status(401).json({ ok: false, error: 'Unauthorized' });
             res.json({ ok: true, data: { code: result.code, nickname: result.nickname || '', app_id: QQ_MINIAPP_APP_ID } });
         }
         catch (error: any) {
             sendError(res, error, 'QQ 小程序授权 Code 获取失败');
         }
+        finally {
+            finishTaskOperation(taskId, owner);
+        }
     });
 
     app.post('/api/qq-login/tasks/:taskId/cancel', async (req: Request, res: Response) => {
+        const owner = findOwnedTask(req, res);
+        if (!owner) return;
+        if (owner.operation) return res.status(409).json({ ok: false, error: '扫码任务结束后会自动释放通道' });
+        const taskId = String(req.params.taskId || '');
+        owner.operation = 'cancel';
         try {
-            if (!checkTaskOwner(req, res, req.params.taskId)) return;
-            await cancelLoginTask(String(req.params.taskId || ''));
-            forgetTask(String(req.params.taskId || ''));
+            await cancelLoginTask(taskId);
+            forgetTask(taskId);
             res.json({ ok: true });
         }
         catch (error: any) {
             sendError(res, error, 'QQ 登录任务取消失败');
+        }
+        finally {
+            finishTaskOperation(taskId, owner);
         }
     });
 }

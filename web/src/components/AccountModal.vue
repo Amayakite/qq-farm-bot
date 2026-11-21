@@ -3,12 +3,12 @@ import { NCard } from 'naive-ui/es/card'
 import { NModal } from 'naive-ui/es/modal'
 import { NRadio, NRadioGroup } from 'naive-ui/es/radio'
 import { NTab, NTabs } from 'naive-ui/es/tabs'
+import { useEventListener } from '@vueuse/core'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseTextarea from '@/components/ui/BaseTextarea.vue'
-import { runWxLoginStatusPoll } from '@/utils/wx-login-poll'
 
 const props = defineProps<{
   show: boolean
@@ -17,6 +17,8 @@ const props = defineProps<{
 
 const emit = defineEmits(['close', 'saved'])
 const QQ_LOGIN_REQUEST_TIMEOUT_MS = 125_000
+const QQ_LOGIN_RETRY_MS = 3000
+const WX_LOGIN_REQUEST_TIMEOUT_MS = 115_000
 
 const loading = ref(false)
 const errorMessage = ref('')
@@ -38,21 +40,18 @@ let wxPollTimer: ReturnType<typeof setTimeout> | undefined
 let wxQrObjectUrl = ''
 let wxFlowVersion = 0
 let wxPollController: AbortController | undefined
-let wxPollInFlight: Promise<void> | undefined
-let wxPollKey = ''
+let wxRequests = Promise.resolve()
 let wxPendingCode = ''
 const qqTaskId = ref('')
 const qqStatus = ref('')
 const qqError = ref('')
 const qqLoading = ref(false)
+const qqWaiting = ref(false)
 const qqQrUrl = ref('')
-let qqPollTimer: ReturnType<typeof setTimeout> | undefined
+let qqTimer: ReturnType<typeof setTimeout> | undefined
 let qqFlowVersion = 0
 let qqPollController: AbortController | undefined
-let qqPollInFlight: Promise<void> | undefined
-let qqPollKey = ''
-let qqCreateRequest = Promise.resolve()
-let qqCancelRequest = Promise.resolve()
+let qqRequests = Promise.resolve()
 let qqPendingCode = ''
 let qrNameSubmitTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -187,7 +186,7 @@ async function loadLoginSettings() {
         activeLoginTab.value = 'code'
       if (activeLoginTab.value === 'qq_qr' && !loginSettings.value.qqQrLogin)
         activeLoginTab.value = 'code'
-      if (activeLoginTab.value === 'qq_qr' && loginSettings.value.qqQrLogin && !qqTaskId.value)
+      if (props.show && activeLoginTab.value === 'qq_qr' && loginSettings.value.qqQrLogin && !qqTaskId.value)
         void startQqLogin()
     }
   }
@@ -236,9 +235,8 @@ function resetWxLogin() {
   const oldTaskId = wxTaskId.value
   wxFlowVersion += 1
   stopWxPolling()
-  if (oldTaskId) {
-    void api.delete(`/api/wx-login/tasks/${oldTaskId}`, { skipErrorToast: true } as any).catch(() => undefined)
-  }
+  if (oldTaskId)
+    wxRequests = wxRequests.then(() => cancelWxLoginTask(oldTaskId))
   if (wxQrObjectUrl) {
     URL.revokeObjectURL(wxQrObjectUrl)
     wxQrObjectUrl = ''
@@ -256,10 +254,14 @@ function isWxFlowActive(taskId: string, flowVersion: number) {
   return flowVersion === wxFlowVersion && taskId === wxTaskId.value
 }
 
+async function cancelWxLoginTask(taskId: string) {
+  await api.delete(`/api/wx-login/tasks/${taskId}`, { skipErrorToast: true } as any).catch(() => undefined)
+}
+
 async function getWxCodeAndAdd(taskId: string, flowVersion: number) {
   if (!isWxFlowActive(taskId, flowVersion))
     return
-  const codeResult = await api.post(`/api/wx-login/tasks/${taskId}/code`)
+  const codeResult = await api.post(`/api/wx-login/tasks/${taskId}/code`, undefined, { timeout: WX_LOGIN_REQUEST_TIMEOUT_MS, skipErrorToast: true } as any)
   if (!isWxFlowActive(taskId, flowVersion))
     return
   const code = String(codeResult.data?.data?.code || '').trim()
@@ -274,24 +276,24 @@ async function confirmWxLogin(taskId: string, flowVersion: number) {
   if (!isWxFlowActive(taskId, flowVersion))
     return
   wxStatus.value = '正在建立登录会话...'
-  await api.post(`/api/wx-login/tasks/${taskId}/confirm`)
+  await api.post(`/api/wx-login/tasks/${taskId}/confirm`, undefined, { timeout: WX_LOGIN_REQUEST_TIMEOUT_MS, skipErrorToast: true } as any)
   if (!isWxFlowActive(taskId, flowVersion))
     return
   await getWxCodeAndAdd(taskId, flowVersion)
 }
 
-async function pollWxLoginRequest(taskId: string, flowVersion: number) {
+async function pollWxLogin(taskId: string, flowVersion: number) {
   if (!isWxFlowActive(taskId, flowVersion))
     return
 
   const controller = new AbortController()
   wxPollController = controller
   try {
-    const response = await runWxLoginStatusPoll(() => api.get(`/api/wx-login/tasks/${taskId}/status`, {
+    const response = await api.get(`/api/wx-login/tasks/${taskId}/status`, {
       timeout: 40000,
       signal: controller.signal,
       skipErrorToast: true,
-    } as any))
+    } as any)
     if (!isWxFlowActive(taskId, flowVersion))
       return
     const status = response.data?.data?.status
@@ -303,7 +305,14 @@ async function pollWxLoginRequest(taskId: string, flowVersion: number) {
     }
     else if (status === 'authorized') {
       stopWxPolling()
-      await confirmWxLogin(taskId, flowVersion)
+      wxLoading.value = true
+      try {
+        await confirmWxLogin(taskId, flowVersion)
+      }
+      finally {
+        if (isWxFlowActive(taskId, flowVersion))
+          wxLoading.value = false
+      }
       return
     }
     else if (['cancelled', 'expired', 'failed'].includes(status)) {
@@ -323,54 +332,37 @@ async function pollWxLoginRequest(taskId: string, flowVersion: number) {
   }
 }
 
-async function pollWxLogin(taskId: string, flowVersion: number) {
-  if (!isWxFlowActive(taskId, flowVersion))
-    return
-
-  const previous = wxPollInFlight
-  const previousKey = wxPollKey
-  if (previous) {
-    await previous.catch(() => undefined)
-    if (!isWxFlowActive(taskId, flowVersion))
-      return
-    if (previousKey === `${taskId}:${flowVersion}`)
-      return
-  }
-
-  const current = pollWxLoginRequest(taskId, flowVersion)
-  wxPollInFlight = current
-  wxPollKey = `${taskId}:${flowVersion}`
-  try {
-    await current
-  }
-  finally {
-    if (wxPollInFlight === current) {
-      wxPollInFlight = undefined
-      wxPollKey = ''
-    }
-  }
-}
-
-async function startWxLogin() {
+function startWxLogin() {
   if (!wechatQrLoginEnabled.value) {
     activeLoginTab.value = 'code'
     return
   }
+  if (wxLoading.value)
+    return
   resetWxLogin()
   const flowVersion = wxFlowVersion
   wxLoading.value = true
+  wxRequests = wxRequests.then(() => requestWxLogin(flowVersion))
+}
+
+async function requestWxLogin(flowVersion: number) {
+  if (flowVersion !== wxFlowVersion)
+    return
   try {
-    const response = await api.post('/api/wx-login/tasks', { app_id: 'wx5306c5978fdb76e4' })
+    const response = await api.post('/api/wx-login/tasks', { app_id: 'wx5306c5978fdb76e4' }, {
+      timeout: WX_LOGIN_REQUEST_TIMEOUT_MS,
+      skipErrorToast: true,
+    } as any)
     const task = response.data?.data
     const taskId = String(task?.task_id || '')
     if (!taskId)
       throw new Error('未创建登录任务')
     if (flowVersion !== wxFlowVersion) {
-      void api.delete(`/api/wx-login/tasks/${taskId}`, { skipErrorToast: true } as any).catch(() => undefined)
+      await cancelWxLoginTask(taskId)
       return
     }
     wxTaskId.value = taskId
-    const qrResponse = await api.get(task.qr_url, { responseType: 'blob' })
+    const qrResponse = await api.get(task.qr_url, { responseType: 'blob', skipErrorToast: true } as any)
     if (!isWxFlowActive(taskId, flowVersion))
       return
     wxQrObjectUrl = URL.createObjectURL(qrResponse.data)
@@ -390,9 +382,9 @@ async function startWxLogin() {
 }
 
 function stopQqPolling() {
-  if (qqPollTimer) {
-    clearTimeout(qqPollTimer)
-    qqPollTimer = undefined
+  if (qqTimer) {
+    clearTimeout(qqTimer)
+    qqTimer = undefined
   }
   qqPollController?.abort()
   qqPollController = undefined
@@ -403,12 +395,13 @@ function resetQqLogin() {
   qqFlowVersion += 1
   stopQqPolling()
   if (taskId)
-    qqCancelRequest = cancelQqLoginTask(taskId)
+    qqRequests = qqRequests.then(() => cancelQqLoginTask(taskId))
   qqTaskId.value = ''
   qqStatus.value = ''
   qqError.value = ''
   qqQrUrl.value = ''
   qqLoading.value = false
+  qqWaiting.value = false
   qqPendingCode = ''
   clearQrNameSubmitTimer()
 }
@@ -463,7 +456,7 @@ async function cancelQqLoginTask(taskId: string) {
   catch {}
 }
 
-async function pollQqLoginRequest(taskId: string, flowVersion: number) {
+async function pollQqLogin(taskId: string, flowVersion: number) {
   if (!isQqFlowActive(taskId, flowVersion))
     return
 
@@ -509,7 +502,7 @@ async function pollQqLoginRequest(taskId: string, flowVersion: number) {
       qqError.value = 'QQ 登录状态异常，请重新获取二维码'
       return
     }
-    qqPollTimer = setTimeout(() => void pollQqLogin(taskId, flowVersion), 1200)
+    qqTimer = setTimeout(() => void pollQqLogin(taskId, flowVersion), 1200)
   }
   catch (error: any) {
     if (!isQqFlowActive(taskId, flowVersion) || error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED')
@@ -522,39 +515,11 @@ async function pollQqLoginRequest(taskId: string, flowVersion: number) {
   }
 }
 
-async function pollQqLogin(taskId: string, flowVersion: number) {
-  if (!isQqFlowActive(taskId, flowVersion))
-    return
-
-  const previous = qqPollInFlight
-  const previousKey = qqPollKey
-  if (previous) {
-    await previous.catch(() => undefined)
-    if (!isQqFlowActive(taskId, flowVersion))
-      return
-    if (previousKey === `${taskId}:${flowVersion}`)
-      return
-  }
-
-  const current = pollQqLoginRequest(taskId, flowVersion)
-  qqPollInFlight = current
-  qqPollKey = `${taskId}:${flowVersion}`
-  try {
-    await current
-  }
-  finally {
-    if (qqPollInFlight === current) {
-      qqPollInFlight = undefined
-      qqPollKey = ''
-    }
-  }
-}
-
 async function requestQqLogin(flowVersion: number) {
+  if (flowVersion !== qqFlowVersion)
+    return
+  qqLoading.value = true
   try {
-    await qqCancelRequest
-    if (flowVersion !== qqFlowVersion)
-      return
     const response = await api.post('/api/qq-login/tasks', undefined, {
       timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS,
       skipErrorToast: true,
@@ -570,17 +535,28 @@ async function requestQqLogin(flowVersion: number) {
     }
     if (!taskId || !qrImage)
       throw new Error('未创建 QQ 登录任务')
+    qqWaiting.value = false
     qqTaskId.value = taskId
     qqQrUrl.value = qrImage
     qqStatus.value = '等待 QQ 扫码'
     void pollQqLogin(taskId, flowVersion)
   }
   catch (error: any) {
-    if (flowVersion === qqFlowVersion) {
-      qqError.value = error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT'
-        ? '获取 QQ 登录二维码超时，请稍后刷新二维码'
-        : getApiErrorMessage(error, 'QQ 登录二维码获取失败')
+    if (flowVersion !== qqFlowVersion)
+      return
+    if (error?.response?.data?.errorType === 'qq_login_busy') {
+      qqWaiting.value = true
+      qqStatus.value = '扫码通道正在使用，空闲后会自动获取二维码'
+      qqTimer = setTimeout(() => {
+        qqRequests = qqRequests.then(() => requestQqLogin(flowVersion))
+      }, QQ_LOGIN_RETRY_MS)
+      return
     }
+    qqWaiting.value = false
+    qqStatus.value = ''
+    qqError.value = error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT'
+      ? '获取 QQ 登录二维码超时，请稍后刷新二维码'
+      : getApiErrorMessage(error, 'QQ 登录二维码获取失败')
   }
   finally {
     if (flowVersion === qqFlowVersion)
@@ -598,7 +574,7 @@ function startQqLogin() {
   resetQqLogin()
   const flowVersion = qqFlowVersion
   qqLoading.value = true
-  qqCreateRequest = qqCreateRequest.then(() => requestQqLogin(flowVersion))
+  qqRequests = qqRequests.then(() => requestQqLogin(flowVersion))
 }
 
 function close() {
@@ -608,7 +584,11 @@ function close() {
 }
 
 watch(() => props.show, (newVal) => {
-  if (newVal) {
+  if (!newVal) {
+    resetWxLogin()
+    resetQqLogin()
+  }
+  else {
     errorMessage.value = ''
     activeLoginTab.value = 'code'
     resetWxLogin()
@@ -627,6 +607,8 @@ watch(() => props.show, (newVal) => {
 })
 
 watch(activeLoginTab, (tab) => {
+  if (!props.show)
+    return
   if (tab === 'wx_qr' && wechatQrLoginEnabled.value && !wxTaskId.value)
     void startWxLogin()
   else if (tab === 'wx_qr' && !wechatQrLoginEnabled.value)
@@ -656,6 +638,17 @@ watch(() => form.name, (name) => {
 onBeforeUnmount(() => {
   resetWxLogin()
   resetQqLogin()
+})
+
+useEventListener('pagehide', () => {
+  const token = localStorage.getItem('admin_token')
+  if (!token)
+    return
+  const headers = { 'x-admin-token': token }
+  if (wxTaskId.value)
+    void fetch(`/api/wx-login/tasks/${wxTaskId.value}`, { method: 'DELETE', headers, keepalive: true }).catch(() => undefined)
+  if (qqTaskId.value)
+    void fetch(`/api/qq-login/tasks/${qqTaskId.value}/cancel`, { method: 'POST', headers, keepalive: true }).catch(() => undefined)
 })
 </script>
 
@@ -750,7 +743,7 @@ onBeforeUnmount(() => {
             </p>
           </div>
           <div class="flex justify-end gap-2">
-            <BaseButton variant="outline" @click="startWxLogin">
+            <BaseButton variant="outline" :loading="wxLoading" @click="startWxLogin">
               刷新二维码
             </BaseButton>
             <BaseButton variant="outline" @click="close">
@@ -770,7 +763,7 @@ onBeforeUnmount(() => {
               <img :src="qqQrUrl" alt="QQ登录二维码" class="h-52 w-52">
             </div>
             <div v-else class="h-52 w-52 flex items-center justify-center text-sm opacity-60">
-              {{ qqLoading ? '正在获取二维码...' : '二维码不可用' }}
+              {{ qqWaiting ? '正在等待二维码…' : qqLoading ? '正在获取二维码…' : '二维码不可用' }}
             </div>
             <p class="text-sm" :style="{ color: 'var(--theme-text)' }">
               {{ qqStatus }}
