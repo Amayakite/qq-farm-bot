@@ -1,0 +1,10 @@
+[Unit]
+Description=Recreate only the NapCat container after an offline QR failure
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+UMask=0077
+TimeoutStartSec=28
+ExecStart=/usr/bin/python3 /opt/services/qq-farm-classic/auth-deploy/recovery/host-recover.py

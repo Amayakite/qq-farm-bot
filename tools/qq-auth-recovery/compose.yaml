@@ -1,0 +1,8 @@
+services:
+  qq-auth:
+    environment:
+      QQ_AUTH_RECOVERY_CONTROL: /run/qq-farm-qr-recovery
+    volumes:
+      - "${QQ_AUTH_RECOVERY_RELEASE:?Set the staged QQ auth release directory}/server.js:/app/server.js:ro"
+      - "${QQ_AUTH_RECOVERY_RELEASE:?Set the staged QQ auth release directory}/qr-readiness.mjs:/app/qr-readiness.mjs:ro"
+      - "${QQ_AUTH_RECOVERY_RELEASE:?Set the staged QQ auth release directory}/../control:/run/qq-farm-qr-recovery"
