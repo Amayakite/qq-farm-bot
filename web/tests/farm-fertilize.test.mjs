@@ -19,6 +19,7 @@ function harness(t, name, api) {
   const imports = {
     '@/api': { __esModule: true, default: api, getApiErrorMessage: value => value?.error || value?.message || '请求失败' },
     '@/stores/account': { useAccountStore: () => account },
+    '@/stores/app': { useAppStore: () => ({ applyBrand() {} }) },
     '@vueuse/core': { useStorage: (_key, initial) => ref(initial) },
   }
   const source = readFileSync(new URL(`../src/stores/${name}.ts`, import.meta.url), 'utf8')
@@ -82,4 +83,23 @@ test('selected-land fertilizer requests preserve the explicit target set', async
   assert.deepEqual(requests[1].body, { fertilizerType: 'organic', landIds: [] })
   await store.fertilizeAll('a', 'normal')
   assert.deepEqual(requests[2].body, { fertilizerType: 'normal' })
+})
+
+test('a completed harvest cannot replace the land state after switching accounts', async (t) => {
+  let completeHarvest
+  const loaded = []
+  const { store } = harness(t, 'farm', {
+    post: () => new Promise(resolve => { completeHarvest = resolve }),
+    get: async (_url, options) => {
+      loaded.push(options.headers['x-account-id'])
+      return { data: { ok: true, data: { lands: [{ id: 2 }], summary: {} } } }
+    },
+  })
+  const harvest = store.operate('a', 'harvest')
+  store.resetLandState()
+  await store.fetchLands('b')
+  completeHarvest({ data: { ok: true, data: { hadWork: true } } })
+  assert.equal((await harvest).hadWork, true)
+  assert.deepEqual(loaded, ['b'])
+  assert.equal(store.lands[0].id, 2)
 })

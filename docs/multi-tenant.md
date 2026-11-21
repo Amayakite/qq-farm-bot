@@ -55,7 +55,7 @@
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `HIDE_UPSTREAM_LINKS` | `0` | `1` 隐藏面板中的上游 GitHub 链接 |
-| `SITE_NAME` | `QQ农场智能助手` | 登录页/兑换页站点名称 |
+| `SITE_NAME` | `QQ农场智能助手` | 登录页/兑换页/侧边栏站点名称 |
 | `SESSION_TTL_HOURS` | `168` | 会话有效期（小时） |
 | `DEFAULT_MAX_ACCOUNTS` | `3` | 新激活码默认账号配额 |
 | `ADMIN_PASSWORD` | 无 | 初始化管理员或替换旧版已知默认密码，留空时生成随机初始密码 |

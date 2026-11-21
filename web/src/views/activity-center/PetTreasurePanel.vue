@@ -486,7 +486,7 @@ defineExpose({ open })
   padding: 9px 12px;
   border: 1px solid #c4ddcd;
   border-radius: 10px;
-  background: var(--ui-primary-soft, #e4f1e7);
+  background: var(--ui-primary-soft);
   color: #2f6f4b;
   font-size: 12.5px;
   font-weight: 700;
@@ -756,8 +756,8 @@ defineExpose({ open })
   margin-left: 6px;
   padding: 0 8px;
   border-radius: 999px;
-  background: var(--ui-primary-soft, #e4f1e7);
-  color: var(--ui-primary, #438d63);
+  background: var(--ui-primary-soft);
+  color: var(--ui-primary);
   font-size: 10.5px;
   font-weight: 800;
 }
@@ -869,7 +869,7 @@ defineExpose({ open })
   padding: 0 2px;
   border: 0;
   background: none;
-  color: var(--ui-primary, #438d63);
+  color: var(--ui-primary);
   font-size: 12.5px;
   font-weight: 800;
   cursor: pointer;
@@ -1052,7 +1052,7 @@ defineExpose({ open })
 }
 
 .escort-log-card summary {
-  color: var(--ui-primary, #438d63);
+  color: var(--ui-primary);
   font-weight: 800;
   cursor: pointer;
 }

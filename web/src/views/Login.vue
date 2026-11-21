@@ -105,7 +105,7 @@ async function handleSubmit() {
         return
       }
       setTimeout(() => {
-        window.location.href = '/'
+        window.location.href = userStore.homePath
       }, 500)
     }
     else if (result.errorType === 'rate_limit') {
@@ -291,15 +291,15 @@ onMounted(() => {
   color: var(--ui-ink);
   background-color: var(--ui-bg);
   background-image:
-    linear-gradient(rgba(67, 141, 99, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(67, 141, 99, 0.045) 1px, transparent 1px);
+    linear-gradient(rgba(var(--ui-primary-rgb), 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--ui-primary-rgb), 0.045) 1px, transparent 1px);
   background-size: 42px 42px;
 }
 
 .login-container::before {
   position: absolute;
   inset: 8% 7%;
-  border: 1px solid rgba(67, 141, 99, 0.08);
+  border: 1px solid rgba(var(--ui-primary-rgb), 0.08);
   border-radius: 36px;
   background: color-mix(in srgb, var(--ui-surface-strong) 22%, transparent);
   content: '';
@@ -388,8 +388,8 @@ onMounted(() => {
 }
 
 .login-card :deep(.base-input:focus) {
-  border-color: rgba(67, 141, 99, 0.55);
-  box-shadow: 0 0 0 3px rgba(67, 141, 99, 0.1);
+  border-color: rgba(var(--ui-primary-rgb), 0.55);
+  box-shadow: 0 0 0 3px rgba(var(--ui-primary-rgb), 0.1);
 }
 
 .form-hint {
@@ -416,13 +416,13 @@ onMounted(() => {
 }
 
 .success-message {
-  border-color: rgba(67, 141, 99, 0.18);
+  border-color: rgba(var(--ui-primary-rgb), 0.18);
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
 }
 
 .notice-message {
-  border-color: rgba(67, 141, 99, 0.18);
+  border-color: rgba(var(--ui-primary-rgb), 0.18);
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
 }

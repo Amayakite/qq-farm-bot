@@ -51,6 +51,7 @@ module.exports = {
     // Global config
     getUI: globalConfig.getUI,
     setUITheme: globalConfig.setUITheme,
+    setUIBrand: globalConfig.setUIBrand,
     getLoginSettings: globalConfig.getLoginSettings,
     setLoginSettings: globalConfig.setLoginSettings,
     getOfflineReminder: globalConfig.getOfflineReminder,

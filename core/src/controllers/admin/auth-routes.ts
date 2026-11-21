@@ -9,6 +9,7 @@ const { createModuleLogger } = require('../../services/logger');
 const userStore = require('../../models/user-store');
 const codeStore = require('../../models/activation-code-store');
 const security = require('../../models/auth-security');
+const store = require('../../models/store');
 
 const {
     getClientIp,
@@ -63,6 +64,7 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
     const authRequired = createAuthRequired(ctx);
 
     app.get('/api/public-config', (_req: Request, res: Response) => {
+        const ui = store.getUI ? store.getUI() : {};
         res.json({
             ok: true,
             data: {
@@ -70,6 +72,8 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
                 siteName: CONFIG.siteName,
                 registrationEnabled: true,
                 redeemEnabled: true,
+                brandColor: ui.brandColor || '#2f6f9f',
+                brandPreset: ui.brandPreset || 'ocean',
             },
         });
     });

@@ -3,6 +3,7 @@ import { useIntervalFn } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
+import AccountModal from '@/components/AccountModal.vue'
 import LevelForecast from '@/components/LevelForecast.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
@@ -12,6 +13,7 @@ import { getPlatformLabel, useAccountStore } from '@/stores/account'
 import { useBagStore } from '@/stores/bag'
 import { useStatusStore } from '@/stores/status'
 import { useToastStore } from '@/stores/toast'
+import { useUserStore } from '@/stores/user'
 
 const statusStore = useStatusStore()
 const accountStore = useAccountStore()
@@ -30,6 +32,8 @@ const logContainer = ref<HTMLElement | null>(null)
 const autoScroll = ref(true)
 const lastBagFetchAt = ref(0)
 const clearingLogs = ref(false)
+const showAccountModal = ref(false)
+const userStore = useUserStore()
 
 const allLogs = computed(() => {
   return [...(statusLogs.value || [])]
@@ -489,6 +493,11 @@ function scrollToBottom() {
   scheduleLogScroll(true)
 }
 
+async function handleAccountSaved() {
+  showAccountModal.value = false
+  await accountStore.fetchAccounts()
+}
+
 onMounted(async () => {
   statusStore.setRealtimeLogsEnabled(!hasActiveLogFilter.value)
   await refresh()
@@ -508,7 +517,27 @@ useIntervalFn(updateCountdowns, 1000)
 </script>
 
 <template>
-  <div class="page-stack flex flex-col gap-5">
+  <div v-if="!currentAccountId" class="page-stack flex flex-col gap-5">
+    <section class="farm-card rounded-2xl p-6">
+      <EmptyState
+        title="还没有添加游戏账号"
+        description="添加账号后，这里会显示农场概览、土地状态和运行日志。"
+        icon="i-carbon-sprout"
+      >
+        <div class="flex flex-wrap justify-center gap-2">
+          <BaseButton variant="primary" size="sm" @click="showAccountModal = true">
+            添加游戏账号
+          </BaseButton>
+          <BaseButton variant="secondary" size="sm" :to="userStore.homePath">
+            返回首页
+          </BaseButton>
+        </div>
+      </EmptyState>
+    </section>
+    <AccountModal :show="showAccountModal" @close="showAccountModal = false" @saved="handleAccountSaved" />
+  </div>
+
+  <div v-else class="page-stack flex flex-col gap-5">
     <!-- Overview -->
     <div class="overview-grid">
       <!-- 账号：身份、在线状态与等级进度 -->
@@ -760,6 +789,8 @@ useIntervalFn(updateCountdowns, 1000)
         </div>
       </div>
     </div>
+
+    <AccountModal :show="showAccountModal" @close="showAccountModal = false" @saved="handleAccountSaved" />
   </div>
 </template>
 

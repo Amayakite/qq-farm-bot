@@ -67,6 +67,7 @@ export const useFarmStore = defineStore('farm', () => {
   const fertilizePending = ref(false)
   const fertilizeError = ref('')
   let landRequestSequence = 0
+  let landScope = 0
   let fertilizeRequestSequence = 0
   let interactionItemsRequestSequence = 0
   let landOverlay: { lands: any[], effects: FriendInteractionEffectDto[], updatedAt: number } | null = null
@@ -188,6 +189,7 @@ export const useFarmStore = defineStore('farm', () => {
 
   function resetLandState() {
     landRequestSequence++
+    landScope++
     fertilizeRequestSequence++
     lands.value = []
     summary.value = {}
@@ -393,14 +395,17 @@ export const useFarmStore = defineStore('farm', () => {
   async function operate(accountId: string, opType: string, landId: number | null = null) {
     if (!accountId)
       return false
+    const scope = landScope
     const res = await api.post('/api/farm/operate', { opType, landId }, {
       headers: { 'x-account-id': accountId },
     })
     if (!res.data?.ok) {
       throw new Error(getApiErrorMessage(res.data, '农场操作失败'))
     }
-    landOverlay = null
-    await fetchLands(accountId)
+    if (scope === landScope) {
+      landOverlay = null
+      await fetchLands(accountId)
+    }
     const result = res.data?.data || { hadWork: false, actions: [] }
     if (result && typeof result.message === 'string')
       result.message = normalizeApiErrorMessage(result.message)

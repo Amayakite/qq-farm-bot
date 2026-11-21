@@ -11,6 +11,7 @@ const {
     DEFAULT_LOGIN_SETTINGS,
     globalConfig,
     normalizeAccountConfig,
+    normalizeUI,
     cloneAccountConfig,
     DEFAULT_ACCOUNT_CONFIG,
 } = sharedState;
@@ -75,7 +76,17 @@ function getUI(): UIConfig {
 function setUITheme(theme: unknown): UIConfig {
     const t = String(theme || '').toLowerCase();
     const next: UIConfig['theme'] = (t === 'light') ? 'light' : 'dark';
-    saveGlobalConfig({ ui: { ...globalConfig.ui, theme: next } });
+    saveGlobalConfig({ ui: normalizeUI({ ...globalConfig.ui, theme: next }) });
+    return getUI();
+}
+
+function setUIBrand(input: { brandColor?: unknown; brandPreset?: unknown } = {}): UIConfig {
+    const next = normalizeUI({
+        ...globalConfig.ui,
+        brandColor: input.brandColor !== undefined ? input.brandColor : globalConfig.ui.brandColor,
+        brandPreset: input.brandPreset !== undefined ? input.brandPreset : globalConfig.ui.brandPreset,
+    });
+    saveGlobalConfig({ ui: next });
     return getUI();
 }
 
@@ -192,6 +203,7 @@ module.exports = {
     saveGlobalConfig,
     getUI,
     setUITheme,
+    setUIBrand,
     getLoginSettings,
     setLoginSettings,
     getOfflineReminder,

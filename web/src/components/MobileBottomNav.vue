@@ -1,17 +1,26 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { getSpaceMenu } from '@/router/menu'
+import { useUserStore } from '@/stores/user'
 
-const route = useRoute()
+const userStore = useUserStore()
 
-// 与侧栏使用同一份名称和图标，只在底栏放最常用的五项。
-const MOBILE_ITEMS: Array<[string, string?]> = [['dashboard'], ['personal'], ['activity-center'], ['game-mall', '商城'], ['Settings']]
-const items = computed(() => MOBILE_ITEMS.flatMap(([name, shortLabel]) => {
-  const inRanch = route.meta.gameSpace === 'ranch'
-  const item = getSpaceMenu(inRanch).find(item => item.name === `${inRanch ? 'ranch-' : ''}${name}`)
-  return item ? [{ path: `/${item.path}`, label: shortLabel || item.label, icon: item.icon }] : []
-}))
+const ownerItems = [
+  { path: '/admin', label: '管理', icon: 'i-carbon-dashboard' },
+  { path: '/admin/tenants', label: '用户', icon: 'i-carbon-user-admin' },
+  { path: '/personal', label: '农场', icon: 'i-carbon-sprout' },
+  { path: '/ranch', label: '牧场', icon: 'i-carbon-pet-image-o' },
+  { path: '/settings', label: '我的', icon: 'i-carbon-settings' },
+]
+
+const tenantItems = [
+  { path: '/home', label: '首页', icon: 'i-carbon-home' },
+  { path: '/personal', label: '农场', icon: 'i-carbon-sprout' },
+  { path: '/ranch', label: '牧场', icon: 'i-carbon-pet-image-o' },
+  { path: '/activity', label: '活动', icon: 'i-carbon-events' },
+  { path: '/settings', label: '我的', icon: 'i-carbon-settings' },
+]
+
+const items = computed(() => userStore.isOwner ? ownerItems : tenantItems)
 </script>
 
 <template>
@@ -40,11 +49,11 @@ const items = computed(() => MOBILE_ITEMS.flatMap(([name, shortLabel]) => {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   min-height: 66px;
   padding: 7px 8px;
-  border: 1px solid rgba(58, 86, 68, 0.12);
+  border: 1px solid var(--ui-border);
   border-radius: 24px;
   background: color-mix(in srgb, var(--ui-bg) 84%, transparent);
   box-shadow:
-    0 16px 42px rgba(55, 75, 61, 0.16),
+    0 16px 42px rgba(31, 41, 51, 0.14),
     inset 0 1px 0 var(--glass-highlight);
   -webkit-backdrop-filter: blur(22px) saturate(135%);
   backdrop-filter: blur(22px) saturate(135%);

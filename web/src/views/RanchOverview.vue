@@ -2,6 +2,7 @@
 import { NButton } from 'naive-ui/es/button'
 import { storeToRefs } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import TourGuide from '@/components/onboarding/TourGuide.vue'
 import { BUCKETS, formatCount, formatDuration, formatHours, RANCH_IMAGE, sortFacilities, useRanchClock, useRanchLoader, useRanchUnmountReset } from '@/components/ranch/ranch-shared'
 import RanchGate from '@/components/ranch/RanchGate.vue'
 import RunLogCard from '@/components/RunLogCard.vue'
@@ -10,11 +11,13 @@ import EmptyState from '@/components/ui/EmptyState.vue'
 import { getPlatformLabel, useAccountStore } from '@/stores/account'
 import { useRanchStore } from '@/stores/ranch'
 import { useStatusStore } from '@/stores/status'
+import { useUserStore } from '@/stores/user'
 
 const accountStore = useAccountStore()
 const { currentAccountId, currentAccount } = storeToRefs(accountStore)
 const { status, currentAccountConnected: isOnline } = storeToRefs(useStatusStore())
 const { state, loading } = storeToRefs(useRanchStore())
+const userStore = useUserStore()
 const { refresh } = useRanchLoader('animals')
 const { remainingSeconds } = useRanchClock()
 useRanchUnmountReset()
@@ -77,6 +80,12 @@ const todo = computed(() => [
   { key: 'clean', label: '待清理', icon: 'i-carbon-clean text-violet-400', value: hazards.value },
 ])
 
+const ranchTourSteps = [
+  { selector: '[data-tour="ranch-overview"]', title: '牧场概览', body: '这里显示牧场等级、经验和资产；牧场状态会自动刷新。' },
+  { selector: '[data-tour="ranch-todo"]', title: '待处理事项', body: '可收获、可生产、可喂养和待清理的数量都在这里，数字不为 0 时建议进去处理。' },
+  { selector: '[data-tour="ranch-facilities"]', title: '牧场设施', body: '查看动物棚舍容量、升级状态和牧草储备。' },
+]
+
 function facilityMeter(f: any) {
   if (f.state === 2)
     return { text: '待建造', percent: 0 }
@@ -92,9 +101,13 @@ function facilityMeter(f: any) {
 
 <template>
   <div class="page-stack flex flex-col gap-5">
-    <EmptyState v-if="!currentAccountId" title="请先选择账号" description="在左侧选择账号后查看牧场" icon="i-carbon-user-avatar" />
+    <EmptyState v-if="!currentAccountId" title="还没有游戏账号" description="添加账号后，这里会显示牧场动物、设施和待处理事项。" icon="i-carbon-pet-image-o">
+      <BaseButton variant="primary" size="sm" to="/settings?tab=account">
+        添加游戏账号
+      </BaseButton>
+    </EmptyState>
     <RanchGate v-else @retry="refresh">
-      <div class="overview-grid">
+      <div class="overview-grid" data-tour="ranch-overview">
         <!-- 账号：身份、在线状态与牧场等级 -->
         <section class="ov-card ov-account">
           <div class="ov-account__head">
@@ -180,7 +193,7 @@ function facilityMeter(f: any) {
 
         <div class="min-w-0 flex flex-col gap-6 md:w-1/4">
           <!-- 待处理：对应农场的“今日统计” -->
-          <section class="farm-card rounded-2xl p-5">
+          <section class="farm-card rounded-2xl p-5" data-tour="ranch-todo">
             <header class="ranch-card-head">
               <h3 class="flex items-center gap-2 text-lg font-display font-medium">
                 <span class="i-carbon-task" /> <span>待处理</span>
@@ -201,7 +214,7 @@ function facilityMeter(f: any) {
           </section>
 
           <!-- 设施 -->
-          <section class="farm-card rounded-2xl p-5">
+          <section class="farm-card rounded-2xl p-5" data-tour="ranch-facilities">
             <h3 class="mb-4 flex items-center gap-2 text-lg font-display font-medium">
               <span class="i-carbon-building" /> <span>牧场设施</span>
             </h3>
@@ -220,6 +233,12 @@ function facilityMeter(f: any) {
         </div>
       </div>
     </RanchGate>
+
+    <TourGuide
+      :storage-key="`tour_ranch_v1:${userStore.userInfo?.id || 'guest'}`"
+      :enabled="userStore.isTenant && !!currentAccountId && !!state"
+      :steps="ranchTourSteps"
+    />
   </div>
 </template>
 

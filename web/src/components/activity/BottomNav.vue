@@ -84,7 +84,7 @@ button:hover {
   transform: translateY(-1px);
 }
 button[data-active] {
-  border-color: rgba(67, 141, 99, 0.24);
+  border-color: rgba(var(--ui-primary-rgb), 0.24);
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
   box-shadow:

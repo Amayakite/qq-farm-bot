@@ -303,6 +303,29 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
+    // API: 全局品牌色（owner 统一调整所有用户的主色）
+    app.post('/api/settings/appearance', requireOwner, (req: Request, res: Response) => {
+        try {
+            const body = (req.body && typeof req.body === 'object') ? req.body : {};
+            if (typeof body.brandColor !== 'string' || !/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(body.brandColor.trim())) {
+                return res.status(400).json({ ok: false, error: '请输入有效的 Hex 颜色' });
+            }
+            const data = store.setUIBrand({
+                brandColor: body.brandColor,
+                brandPreset: body.brandPreset,
+            });
+            if (ctx.io) {
+                ctx.io.emit('appearance:update', {
+                    brandColor: data.brandColor,
+                    brandPreset: data.brandPreset,
+                });
+            }
+            res.json({ ok: true, data });
+        } catch (e: any) {
+            handleApiError(res, e);
+        }
+    });
+
     // API: 保存下线提醒配置
     app.post('/api/settings/offline-reminder', requireOwner, async (req: Request, res: Response) => {
         try {

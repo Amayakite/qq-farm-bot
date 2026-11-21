@@ -1,4 +1,4 @@
-import type { AccountConfig, AutomationConfig, BagSeedFallbackStrategy, FertilizerLandType, FertilizerMode, GlobalConfig, IntervalConfig, LoginSettings, OfflineReminder, PlantingStrategy, QuietHoursConfig } from '../../types/config';
+import type { AccountConfig, AutomationConfig, BagSeedFallbackStrategy, FertilizerLandType, FertilizerMode, GlobalConfig, IntervalConfig, LoginSettings, OfflineReminder, PlantingStrategy, QuietHoursConfig, UIConfig } from '../../types/config';
 export {};
 
 const { DEFAULT_TIME_ZONE, normalizeTimeZone, resolveClientVersion } = require('../../config/config');
@@ -48,6 +48,34 @@ const DEFAULT_LOGIN_SETTINGS: LoginSettings = {
     napCatEndpoint: '',
     napCatSignature: '',
 };
+
+const DEFAULT_BRAND_COLOR = '#2f6f9f';
+const DEFAULT_BRAND_PRESET = 'ocean';
+const BRAND_PRESETS: Set<string> = new Set(['ocean', 'indigo', 'violet', 'rose', 'amber', 'teal', 'forest', 'graphite', 'custom']);
+
+function normalizeBrandColor(input: unknown): string {
+    const raw = String(input || '').trim().toLowerCase();
+    if (/^#[0-9a-f]{6}$/.test(raw)) return raw;
+    if (/^#[0-9a-f]{3}$/.test(raw)) {
+        return `#${raw[1]}${raw[1]}${raw[2]}${raw[2]}${raw[3]}${raw[3]}`;
+    }
+    return DEFAULT_BRAND_COLOR;
+}
+
+function normalizeBrandPreset(input: unknown): string {
+    const raw = String(input || '').trim().toLowerCase();
+    return BRAND_PRESETS.has(raw) ? raw : DEFAULT_BRAND_PRESET;
+}
+
+function normalizeUI(input: unknown): UIConfig {
+    const src: Record<string, any> = (input && typeof input === 'object') ? input as Record<string, any> : {};
+    const theme = String(src.theme || '').toLowerCase() === 'light' ? 'light' : 'dark';
+    return {
+        theme,
+        brandColor: normalizeBrandColor(src.brandColor),
+        brandPreset: normalizeBrandPreset(src.brandPreset),
+    };
+}
 
 const DEFAULT_ACCOUNT_CONFIG: AccountConfig = {
     automation: {
@@ -531,6 +559,8 @@ const globalConfig: GlobalConfig = {
     defaultAccountConfig: cloneAccountConfig(DEFAULT_ACCOUNT_CONFIG),
     ui: {
         theme: 'light',
+        brandColor: DEFAULT_BRAND_COLOR,
+        brandPreset: DEFAULT_BRAND_PRESET,
     },
     loginSettings: { ...DEFAULT_LOGIN_SETTINGS },
     offlineReminder: { ...DEFAULT_OFFLINE_REMINDER },
@@ -561,9 +591,7 @@ function loadGlobalConfig(): void {
                 if (!sid) continue;
                 globalConfig.accountConfigs[sid] = normalizeAccountConfig(cfg, DEFAULT_ACCOUNT_CONFIG);
             }
-            globalConfig.ui = { ...globalConfig.ui, ...(data.ui || {}) };
-            const theme = String(globalConfig.ui.theme || '').toLowerCase();
-            globalConfig.ui.theme = theme === 'light' ? 'light' : 'dark';
+            globalConfig.ui = normalizeUI({ ...globalConfig.ui, ...(data.ui || {}) });
 
             // offlineReminder normalization done in global-config
             if (data.offlineReminder && typeof data.offlineReminder === 'object') {
@@ -651,8 +679,13 @@ module.exports = {
     DEFAULT_FRIENDS_LIST_CACHE_TTL_SEC,
     DEFAULT_OFFLINE_REMINDER,
     DEFAULT_LOGIN_SETTINGS,
+    DEFAULT_BRAND_COLOR,
+    DEFAULT_BRAND_PRESET,
     DEFAULT_ACCOUNT_CONFIG,
     ALLOWED_AUTOMATION_KEYS,
+    normalizeUI,
+    normalizeBrandColor,
+    normalizeBrandPreset,
     // Mutable shared state (by reference)
     globalConfig,
     get accountFallbackConfig() { return accountFallbackConfig; },
