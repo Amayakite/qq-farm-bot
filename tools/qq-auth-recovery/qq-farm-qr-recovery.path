@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch for a verified QQ QR recovery request
+
+[Path]
+PathExists=/opt/services/qq-farm-classic/auth-deploy/recovery/control/request.json
+
+[Install]
+WantedBy=multi-user.target

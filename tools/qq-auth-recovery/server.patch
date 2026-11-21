@@ -1,0 +1,53 @@
+--- a/server.js
++++ b/server.js
+@@ -8,0 +9 @@
++import { createQrReadiness, logoutConfirmedByWebUi, requestNapcatRecreate } from "./qr-readiness.mjs";
+@@ -42,0 +44,6 @@
++const qrReadiness = createQrReadiness({
++  call: webUiCall,
++  clearCredential: () => { webUiCredential = ""; },
++  recreate: requestNapcatRecreate(process.env.QQ_AUTH_RECOVERY_CONTROL),
++  report: (event) => console.info(JSON.stringify({ event: "qq_qr_readiness", outcome: event }))
++});
+@@ -527,25 +534,7 @@
+-  try {
+-    try {
+-      await webUiCall("/QQLogin/RefreshQRcode");
+-    } catch {
+-      // Older NapCat versions may create a fresh QR directly from the getter.
+-    }
+-    const result = await webUiCall("/QQLogin/GetQQLoginQrcode");
+-    const qrValue = pickQrValue(result);
+-    const qrImage = await makeQrImage(qrValue);
+-    if (!qrImage) throw new Error("NapCat WebUI did not return a usable QR code");
+-    return createLoginTask(ownerKey, {
+-      mode: "webui-api",
+-      qrUrl: /^https?:\/\//i.test(String(qrValue || "")) ? qrValue : undefined,
+-      qrImage
+-    });
+-  } catch (error) {
+-    // 已经登录时 GetQQLoginQrcode 会返回错误，继续读取当前账号。
+-    try {
+-      const user = await webUiCall("/QQLogin/GetQQLoginInfo");
+-      if (hasLoggedInUser(user)) return createLoginTask(ownerKey, { mode: "webui-api", status: "success", user });
+-      throw error;
+-    } catch {
+-      throw error;
+-    }
+-  }
++  const qrValue = await qrReadiness.open();
++  const qrImage = await makeQrImage(qrValue);
++  return createLoginTask(ownerKey, {
++    mode: "webui-api",
++    qrUrl: /^https?:\/\//i.test(qrValue) ? qrValue : undefined,
++    qrImage
++  });
+@@ -819,0 +809 @@
++    qrReadiness.invalidate();
+@@ -820,0 +811,4 @@
++      const status = await webUiCall("/QQLogin/CheckLoginStatus").catch(() => null);
++      // A clean logout does not need a worker restart. The next workflow
++      // must independently prove readiness by obtaining a fresh QR.
++      if (logoutConfirmedByWebUi(status)) return result;
+@@ -1233,0 +1228 @@
++        ...qrReadiness.health(),
