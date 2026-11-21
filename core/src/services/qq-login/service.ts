@@ -103,7 +103,7 @@ async function requestNapCat(path: string, body: Record<string, unknown>, requir
 
     const data = response?.data;
     if (requireOk && (!data || typeof data !== 'object' || data.ok !== true)) {
-        throw new Error(napCatErrorMessage(data));
+        throw Object.assign(new Error(napCatErrorMessage(data)), { code: data?.code });
     }
     return data;
 }

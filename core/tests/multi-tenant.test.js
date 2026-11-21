@@ -86,6 +86,119 @@ test('QQ 二维码请求断开后释放晚到的任务，随后可以再次取�
     assert.deepEqual(cancelled, ['first', 'second']);
 });
 
+function qrResponse() {
+    return {
+        statusCode: 200,
+        status(code) { this.statusCode = code; return this; },
+        json(payload) { this.payload = payload; },
+    };
+}
+
+test('QQ 扫码通道忙时允许稍后重试，其他会话不能读取或取消现有任务', async () => {
+    let providerBusy = true;
+    let finishCode;
+    const routes = new Map();
+    const { mountQqLoginRoutes } = load('controllers/admin/qq-login-routes.js', {
+        '../../services/qq-login/service': {
+            createLoginTask: async () => {
+                if (providerBusy) throw Object.assign(new Error('busy'), { code: 'WORKFLOW_BUSY' });
+                return { taskId: 'task', status: 'waiting_scan', qrImage: 'fake-qr-image', expiresAt: Date.now() + 30_000 };
+            },
+            getMiniappCode: () => new Promise(resolve => { finishCode = resolve; }),
+            cancelLoginTask: async () => assert.fail('A concurrent or foreign request cannot cancel this task'),
+        },
+        './middleware': { resolveAuthContext: () => ({ auth: {} }) },
+    });
+    mountQqLoginRoutes({ post: (path, handler) => routes.set(path, handler) }, {});
+    const create = routes.get('/api/qq-login/tasks');
+    const code = routes.get('/api/qq-login/tasks/:taskId/code');
+    const cancel = routes.get('/api/qq-login/tasks/:taskId/cancel');
+    const owner = { adminToken: 'session-a', params: { taskId: 'task' } };
+    const other = { ...owner, adminToken: 'session-b' };
+
+    const unavailable = qrResponse();
+    await create(owner, unavailable);
+    assert.equal(unavailable.statusCode, 409);
+    assert.equal(unavailable.payload.errorType, 'qq_login_busy');
+    providerBusy = false;
+    const created = qrResponse();
+    await create(owner, created);
+    assert.equal(created.payload.data.qr_image, 'fake-qr-image');
+    const occupied = qrResponse();
+    await create(other, occupied);
+    assert.equal(occupied.statusCode, 409);
+    assert.equal(occupied.payload.errorType, 'qq_login_busy');
+    for (const route of [routes.get('/api/qq-login/tasks/:taskId/status'), code, cancel]) {
+        const denied = qrResponse();
+        await route(other, denied);
+        assert.equal(denied.statusCode, 404);
+    }
+    const issued = qrResponse();
+    const issuing = code(owner, issued);
+    const racingCancel = qrResponse();
+    await cancel(owner, racingCancel);
+    assert.equal(racingCancel.statusCode, 409);
+    finishCode({ code: 'test-code' });
+    await issuing;
+    assert.equal(issued.payload.data.code, 'test-code');
+
+    const next = qrResponse();
+    await create(other, next);
+    assert.equal(next.payload.ok, true);
+});
+
+test('微信二维码按租户并行创建，确认请求等待本任务的轮询状态', async () => {
+    const pendingCreates = [];
+    let finishPoll;
+    let confirms = 0;
+    const destroyed = [];
+    const routes = new Map();
+    const { mountWxLoginRoutes } = load('controllers/admin/wx-login-routes.js', {
+        '../../models/store': { getLoginSettings: () => ({ wechatQrLogin: true }) },
+        './middleware': { resolveAuthContext: () => ({ auth: {} }) },
+        '../../services/wx-login/service': { WxLoginService: class {
+            createQrSession() { return new Promise(resolve => pendingCreates.push(resolve)); }
+            poll() { return new Promise(resolve => { finishPoll = resolve; }); }
+            async confirm() { confirms++; }
+            destroy(session) { destroyed.push(session.uuid); }
+        } },
+    });
+    const mount = method => (path, handler) => routes.set(`${method} ${path}`, handler);
+    mountWxLoginRoutes({ post: mount('POST'), get: mount('GET'), delete: mount('DELETE') }, {});
+    const create = routes.get('POST /api/wx-login/tasks');
+    const user = id => ({ adminToken: `session-${id}`, auth: { user: { id } } });
+    const abandoned = { destroyed: false, json: () => assert.fail('disconnected response must not receive a QR') };
+    const first = create(user('a'), abandoned);
+    const secondResponse = qrResponse();
+    const second = create(user('b'), secondResponse);
+    assert.equal(pendingCreates.length, 2);
+    abandoned.destroyed = true;
+    pendingCreates[0]({ session: { uuid: 'a' }, qr: Buffer.from('a') });
+    pendingCreates[1]({ session: { uuid: 'b' }, qr: Buffer.from('b') });
+    await Promise.all([first, second]);
+    assert.deepEqual(destroyed, ['a']);
+
+    const params = { taskId: secondResponse.payload.data.task_id };
+    const owned = { ...user('b'), params };
+    const status = routes.get('GET /api/wx-login/tasks/:taskId/status');
+    const denied = qrResponse();
+    await status({ ...user('a'), params }, denied);
+    assert.equal(denied.statusCode, 404);
+
+    const pollResponse = qrResponse();
+    const polling = status(owned, pollResponse);
+    const confirm = routes.get('POST /api/wx-login/tasks/:taskId/confirm');
+    const confirmations = [qrResponse(), qrResponse()];
+    const confirming = confirmations.map(res => confirm(owned, res));
+    assert.equal(confirms, 0);
+    finishPoll('authorized');
+    await Promise.all([polling, ...confirming]);
+    assert.equal(pollResponse.payload.data.status, 'authorized');
+    assert.equal(confirms, 1);
+    assert.ok(confirmations.every(res => res.payload.data.status === 'ready_for_code'));
+    await routes.get('DELETE /api/wx-login/tasks/:taskId')(owned, qrResponse());
+});
+
 test('首次启动为 owner 生成私有的初始密码', () => {
     const dir = tempDir();
     const users = loadUserStore(dir);

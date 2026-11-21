@@ -17,7 +17,12 @@ const tasks = new Map<string, Task>();
 const creating = new Set<string>();
 const wxLogin = new WxLoginService();
 
-function destroy(task: Task): void { clearTimeout(task.timer); wxLogin.destroy(task.session); task.code = undefined; tasks.delete(task.id); }
+function destroy(task: Task): void {
+    if (!tasks.delete(task.id)) return;
+    clearTimeout(task.timer);
+    wxLogin.destroy(task.session);
+    task.code = undefined;
+}
 function publicTask(task: Task) { return { task_id: task.id, app_id: TARGET_APP_ID, status: task.status, expires_at: Math.floor((task.createdAt + TASK_TTL_MS) / 1000) }; }
 function findTask(req: Request, res: Response): Task | null {
     const task = tasks.get(String(req.params.taskId || ''));
@@ -56,13 +61,15 @@ function mountWxLoginRoutes(app: Application, ctx: AdminContext): void {
         creating.add(ownerId);
         try {
             const task = await createTask(ownerId, adminToken);
-            if (!resolveAuthContext(ctx, adminToken).auth) {
+            const { error } = resolveAuthContext(ctx, adminToken);
+            if (res.destroyed || error) {
                 destroy(task);
-                return res.status(401).json({ ok: false, error: 'Unauthorized' });
+                if (!res.destroyed && error) res.status(error.status).json(error.body);
+                return;
             }
             res.json({ ok: true, data: { ...publicTask(task), qr_url: `/api/wx-login/tasks/${task.id}/qr` } });
         } catch (error: any) {
-            res.status(502).json({ ok: false, error: error.message });
+            if (!res.destroyed) res.status(502).json({ ok: false, error: error.message });
         } finally {
             creating.delete(ownerId);
         }
@@ -74,8 +81,45 @@ function mountWxLoginRoutes(app: Application, ctx: AdminContext): void {
         destroy(task);
         return res.json({ ok: true });
     });
-    app.get('/api/wx-login/tasks/:taskId/status', async (req, res) => { const task = findTask(req, res); if (!task) return; try { if (!task.pending) task.pending = poll(task).finally(() => { task.pending = undefined; }); await task.pending; const data = publicTask(task); if (task.status === 'cancelled' || task.status === 'expired') destroy(task); res.json({ ok: true, data }); } catch (error: any) { task.status = 'failed'; destroy(task); res.status(502).json({ ok: false, error: error.message }); } });
-    app.post('/api/wx-login/tasks/:taskId/confirm', async (req, res) => { const task = findTask(req, res); if (!task) return; try { if (!task.pending) task.pending = confirm(task).finally(() => { task.pending = undefined; }); await task.pending; res.json({ ok: true, data: publicTask(task) }); } catch (error: any) { task.status = 'failed'; destroy(task); res.status(502).json({ ok: false, error: error.message }); } });
+    app.get('/api/wx-login/tasks/:taskId/status', async (req, res) => {
+        const task = findTask(req, res);
+        if (!task) return;
+        try {
+            if (task.status === 'waiting' || task.status === 'scanned') {
+                if (!task.pending) task.pending = poll(task).finally(() => { task.pending = undefined; });
+                await task.pending;
+                if (!findTask(req, res)) return;
+            }
+            const data = publicTask(task);
+            if (task.status === 'cancelled' || task.status === 'expired') destroy(task);
+            res.json({ ok: true, data });
+        } catch (error: any) {
+            task.status = 'failed';
+            destroy(task);
+            res.status(502).json({ ok: false, error: error.message });
+        }
+    });
+    app.post('/api/wx-login/tasks/:taskId/confirm', async (req, res) => {
+        const task = findTask(req, res);
+        if (!task) return;
+        try {
+            await task.pending;
+            if (!findTask(req, res)) return;
+            if (task.status === 'authorized') {
+                if (!task.pending) task.pending = confirm(task).finally(() => { task.pending = undefined; });
+                await task.pending;
+                if (!findTask(req, res)) return;
+            }
+            if (task.status !== 'ready_for_code') {
+                return res.status(409).json({ ok: false, error: '请先完成扫码确认' });
+            }
+            res.json({ ok: true, data: publicTask(task) });
+        } catch (error: any) {
+            task.status = 'failed';
+            destroy(task);
+            res.status(502).json({ ok: false, error: error.message });
+        }
+    });
     app.post('/api/wx-login/tasks/:taskId/code', async (req, res) => {
         const task = findTask(req, res);
         if (!task) return;
