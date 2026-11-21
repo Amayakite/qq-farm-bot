@@ -3,667 +3,244 @@ import { NCard } from 'naive-ui/es/card'
 import { NModal } from 'naive-ui/es/modal'
 import { NRadio, NRadioGroup } from 'naive-ui/es/radio'
 import { NTab, NTabs } from 'naive-ui/es/tabs'
-import { useEventListener } from '@vueuse/core'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseTextarea from '@/components/ui/BaseTextarea.vue'
 
+type Platform = 'qq' | 'wx'
+type ScanStatus = 'queued' | 'creating' | 'waiting_scan' | 'scanned' | 'authorizing' | 'releasing' | 'completed' | 'cancelled' | 'expired' | 'failed'
+interface ScanTask {
+  id: string
+  status: ScanStatus
+  qrImage?: string
+  error?: string
+}
+
 const props = defineProps<{
   show: boolean
-  editData?: any
+  editData?: { id?: string | number, name?: string, platform?: string } | null
 }>()
 
 const emit = defineEmits(['close', 'saved'])
-const QQ_LOGIN_REQUEST_TIMEOUT_MS = 125_000
-const QQ_LOGIN_RETRY_MS = 3000
-const WX_LOGIN_REQUEST_TIMEOUT_MS = 115_000
+const taskPath = '/api/account-scan/tasks'
+const terminal = new Set<ScanStatus>(['completed', 'cancelled', 'failed', 'expired'])
+const messages: Record<ScanStatus, string> = {
+  queued: '正在等待扫码通道',
+  creating: '正在生成二维码',
+  waiting_scan: '请打开手机应用扫码',
+  scanned: '已扫码，请在手机上确认',
+  authorizing: '正在获取授权并保存账号',
+  releasing: '正在释放扫码通道',
+  completed: '账号已保存',
+  cancelled: '扫码已取消',
+  expired: '扫码任务已过期，请重新获取',
+  failed: '',
+}
 
+const form = reactive({ name: '', code: '', platform: 'qq' as Platform })
 const loading = ref(false)
 const errorMessage = ref('')
-const activeLoginTab = ref<'code' | 'wx_qr' | 'qq_qr'>('code')
+const activeLoginTab = ref<'code' | Platform>('code')
 const loginSettingsLoaded = ref(false)
-const loginSettings = ref({
-  wechatQrLogin: true,
-  qqQrLogin: false,
-  napCatEndpoint: '',
-  napCatSignature: '',
-})
-let loginSettingsRequestVersion = 0
-const wxTaskId = ref('')
-const wxStatus = ref('')
-const wxError = ref('')
-const wxLoading = ref(false)
-const wxQrUrl = ref('')
-let wxPollTimer: ReturnType<typeof setTimeout> | undefined
-let wxQrObjectUrl = ''
-let wxFlowVersion = 0
-let wxPollController: AbortController | undefined
-let wxRequests = Promise.resolve()
-let wxPendingCode = ''
-const qqTaskId = ref('')
-const qqStatus = ref('')
-const qqError = ref('')
-const qqLoading = ref(false)
-const qqWaiting = ref(false)
-const qqQrUrl = ref('')
-let qqTimer: ReturnType<typeof setTimeout> | undefined
-let qqFlowVersion = 0
-let qqPollController: AbortController | undefined
-let qqRequests = Promise.resolve()
-let qqPendingCode = ''
-let qrNameSubmitTimer: ReturnType<typeof setTimeout> | undefined
+const loginSettings = ref({ qqQrLogin: false, wechatQrLogin: false })
+let settingsVersion = 0
+const editPlatform = computed<Platform>(() => props.editData?.platform === 'wx' ? 'wx' : 'qq')
+const availablePlatforms = computed(() => ({
+  qq: loginSettings.value.qqQrLogin && (!props.editData || editPlatform.value === 'qq'),
+  wx: loginSettings.value.wechatQrLogin && (!props.editData || editPlatform.value === 'wx'),
+}))
 
-const wechatQrLoginEnabled = computed(() => loginSettingsLoaded.value && loginSettings.value.wechatQrLogin)
-const qqQrLoginEnabled = computed(() => loginSettingsLoaded.value && loginSettings.value.qqQrLogin)
+const scan = ref<ScanTask | null>(null)
+const scanStarting = ref(false)
+const scanError = ref('')
+const scanInProgress = computed(() => scanStarting.value || (!!scan.value && !terminal.has(scan.value.status)))
+const finishingScan = computed(() => scan.value?.status === 'authorizing' || scan.value?.status === 'releasing')
+const scanMessage = computed(() => scanStarting.value ? '正在申请扫码' : scan.value ? messages[scan.value.status] : '')
+const scanLabel = computed(() => activeLoginTab.value === 'wx' ? '微信扫码登录' : 'QQ扫码登录')
+const scanImageLabel = computed(() => activeLoginTab.value === 'wx' ? '微信登录二维码' : 'QQ登录二维码')
+let scanVersion = 0
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+let lastRequest: { id: string, intent: string } | undefined
 
-// 表单数据
-const form = reactive({
-  name: '',
-  code: '',
-  platform: 'qq' as 'qq' | 'wx',
-})
-
-// 添加账号
-async function addAccount(data: any, isRelogin = false) {
-  const name = String(data?.name || '').trim()
-  if (!isRelogin && !name) {
-    errorMessage.value = '请输入账号备注'
-    return false
-  }
-
-  loading.value = true
-  errorMessage.value = ''
+async function loadLoginSettings() {
+  const version = ++settingsVersion
+  loginSettingsLoaded.value = false
   try {
-    const res = await api.post('/api/accounts', { ...data, name, ...(props.editData?.id ? { id: props.editData.id } : {}) })
-    if (res.data.ok) {
-      emit('saved')
-      close()
-      return true
-    }
-    else {
-      errorMessage.value = `保存失败: ${getApiErrorMessage(res.data, '请求失败')}`
-    }
+    const response = await api.get('/api/settings/login-config', { skipErrorToast: true } as any)
+    if (version !== settingsVersion)
+      return
+    const data = response.data?.data
+    loginSettings.value = { qqQrLogin: data?.qqQrLogin === true, wechatQrLogin: data?.wechatQrLogin === true }
   }
-  catch (e: any) {
-    errorMessage.value = `保存失败: ${getApiErrorMessage(e, '请求失败')}`
+  catch {
+    if (version === settingsVersion)
+      loginSettings.value = { qqQrLogin: false, wechatQrLogin: false }
+  }
+  finally {
+    if (version === settingsVersion)
+      loginSettingsLoaded.value = true
+  }
+}
+
+async function submitManual() {
+  errorMessage.value = ''
+  const name = form.name.trim()
+  if (!name) {
+    errorMessage.value = '请输入账号备注'
+    return
+  }
+  let code = form.code.trim()
+  if (!code) {
+    errorMessage.value = '请输入 Code'
+    return
+  }
+  loading.value = true
+  try {
+    const match = code.match(/[?&]code=([^&]+)/i)
+    if (match?.[1])
+      code = decodeURIComponent(match[1]).trim()
+    const response = await api.post('/api/accounts', {
+      name,
+      code,
+      platform: props.editData ? editPlatform.value : form.platform,
+      loginType: 'manual',
+      ...(props.editData?.id ? { id: props.editData.id } : {}),
+    }, { skipErrorToast: true } as any)
+    if (!response.data?.ok)
+      throw new Error(getApiErrorMessage(response.data))
+    emit('saved')
+    close()
+  }
+  catch (error) {
+    errorMessage.value = getApiErrorMessage(error, '保存账号失败')
   }
   finally {
     loading.value = false
   }
-
-  return false
 }
 
-function clearQrNameSubmitTimer() {
-  if (qrNameSubmitTimer) {
-    clearTimeout(qrNameSubmitTimer)
-    qrNameSubmitTimer = undefined
+function cancelScan(id: string) {
+  return api.delete(`${taskPath}/${id}`, { skipErrorToast: true } as any).catch(() => undefined)
+}
+
+function resetScan() {
+  scanVersion++
+  clearTimeout(pollTimer)
+  const previous = scan.value
+  scan.value = null
+  scanStarting.value = false
+  scanError.value = ''
+  lastRequest = undefined
+  if (previous && !terminal.has(previous.status) && previous.status !== 'authorizing' && previous.status !== 'releasing')
+    void cancelScan(previous.id)
+}
+
+function applyTask(task: ScanTask, version: number) {
+  scan.value = task
+  scanError.value = task.error || ''
+  if (task.status === 'completed') {
+    emit('saved')
+    close()
+  }
+  else if (!terminal.has(task.status)) {
+    pollTimer = setTimeout(() => void pollScan(task.id, version), 1200)
   }
 }
 
-async function addQrAccount(platform: 'wx' | 'qq', code: string, nickname: string) {
-  const name = form.name.trim() || nickname
-  if (platform === 'wx')
-    wxPendingCode = code
-  else
-    qqPendingCode = code
-
-  if (!name) {
-    if (platform === 'wx') {
-      wxStatus.value = '登录授权已完成，等待填写账号备注'
-      wxError.value = '未获取到微信昵称，请填写账号备注'
+async function pollScan(id: string, version: number) {
+  try {
+    const response = await api.get(`${taskPath}/${id}`, { skipErrorToast: true } as any)
+    if (version === scanVersion)
+      applyTask(response.data.data, version)
+  }
+  catch (error: any) {
+    if (version !== scanVersion)
+      return
+    if (!error.response || error.response.status >= 500) {
+      scanError.value = '连接暂时中断，正在重新获取扫码状态'
+      pollTimer = setTimeout(() => void pollScan(id, version), 3000)
     }
     else {
-      qqStatus.value = '登录授权已完成，等待填写账号备注'
-      qqError.value = '未获取到 QQ 昵称，请填写账号备注'
+      if (scan.value)
+        scan.value = { id, status: 'failed' }
+      scanError.value = getApiErrorMessage(error, '扫码任务已失效')
     }
-    return
-  }
-
-  form.name = name
-  await submitPendingQrAccount(platform)
-}
-
-async function submitPendingQrAccount(platform: 'wx' | 'qq') {
-  const name = form.name.trim() || props.editData?.name || ''
-  const code = platform === 'wx' ? wxPendingCode : qqPendingCode
-  if (!name || !code || !props.show || activeLoginTab.value !== `${platform}_qr`)
-    return
-
-  if (platform === 'wx') {
-    wxPendingCode = ''
-    wxError.value = ''
-    wxStatus.value = props.editData ? '正在重新登录...' : '正在添加账号...'
-  }
-  else {
-    qqPendingCode = ''
-    qqError.value = ''
-    qqStatus.value = props.editData ? '正在重新登录...' : '正在添加账号...'
-  }
-
-  const payload: any = { name, code, platform, loginType: 'manual' }
-  const saved = await addAccount(payload, !!props.editData)
-  if (!saved && props.show && activeLoginTab.value === `${platform}_qr`) {
-    if (platform === 'wx')
-      wxPendingCode = code
-    else
-      qqPendingCode = code
   }
 }
 
-async function loadLoginSettings() {
-  const requestVersion = ++loginSettingsRequestVersion
-  loginSettingsLoaded.value = false
+async function startScan() {
+  const platform = activeLoginTab.value
+  if (platform === 'code' || !availablePlatforms.value[platform] || scanInProgress.value)
+    return
+  const name = form.name.trim()
+  const accountId = props.editData?.id === undefined ? undefined : String(props.editData.id)
+  const intent = JSON.stringify([platform, accountId, name])
+  if (scan.value || lastRequest?.intent !== intent) {
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('')
+    lastRequest = { id, intent }
+  }
+  const version = ++scanVersion
+  scan.value = null
+  scanError.value = ''
+  scanStarting.value = true
   try {
-    const response = await api.get('/api/settings/login-config', { skipErrorToast: true } as any)
-    if (requestVersion !== loginSettingsRequestVersion)
+    const response = await api.post(taskPath, { platform, accountId, name, requestId: lastRequest!.id }, { skipErrorToast: true } as any)
+    const task = response.data.data as ScanTask
+    if (version !== scanVersion) {
+      if (!terminal.has(task.status))
+        void cancelScan(task.id)
       return
-    const data = response.data?.data
-    loginSettings.value = {
-      wechatQrLogin: typeof data?.wechatQrLogin === 'boolean' ? data.wechatQrLogin : true,
-      qqQrLogin: typeof data?.qqQrLogin === 'boolean' ? data.qqQrLogin : false,
-      napCatEndpoint: typeof data?.napCatEndpoint === 'string' ? data.napCatEndpoint : '',
-      napCatSignature: typeof data?.napCatSignature === 'string' ? data.napCatSignature : '',
     }
+    applyTask(task, version)
   }
-  catch {
-    if (requestVersion !== loginSettingsRequestVersion)
-      return
-    // Keep the existing login entries available when an older server has no endpoint yet.
-    loginSettings.value = {
-      wechatQrLogin: true,
-      qqQrLogin: false,
-      napCatEndpoint: '',
-      napCatSignature: '',
-    }
+  catch (error) {
+    if (version === scanVersion)
+      scanError.value = getApiErrorMessage(error, '无法提交扫码，请重试')
   }
   finally {
-    if (requestVersion === loginSettingsRequestVersion) {
-      loginSettingsLoaded.value = true
-      if (activeLoginTab.value === 'wx_qr' && !loginSettings.value.wechatQrLogin)
-        activeLoginTab.value = 'code'
-      if (activeLoginTab.value === 'qq_qr' && !loginSettings.value.qqQrLogin)
-        activeLoginTab.value = 'code'
-      if (props.show && activeLoginTab.value === 'qq_qr' && loginSettings.value.qqQrLogin && !qqTaskId.value)
-        void startQqLogin()
-    }
+    if (version === scanVersion)
+      scanStarting.value = false
   }
-}
-
-// 手动提交
-async function submitManual() {
-  errorMessage.value = ''
-  if (!props.editData && !form.name.trim()) {
-    errorMessage.value = '请输入账号备注'
-    return
-  }
-  if (!form.code) {
-    errorMessage.value = '请输入Code'
-    return
-  }
-  form.name = form.name.trim()
-
-  let code = form.code.trim()
-  const match = code.match(/[?&]code=([^&]+)/i)
-  if (match && match[1]) {
-    code = decodeURIComponent(match[1])
-    form.code = code
-  }
-
-  const payload: any = {
-    name: form.name,
-    code,
-    platform: props.editData ? (props.editData.platform || 'qq') : form.platform,
-    loginType: 'manual',
-  }
-
-  await addAccount(payload, !!props.editData)
-}
-
-function stopWxPolling() {
-  if (wxPollTimer) {
-    clearTimeout(wxPollTimer)
-    wxPollTimer = undefined
-  }
-  wxPollController?.abort()
-  wxPollController = undefined
-}
-
-function resetWxLogin() {
-  const oldTaskId = wxTaskId.value
-  wxFlowVersion += 1
-  stopWxPolling()
-  if (oldTaskId)
-    wxRequests = wxRequests.then(() => cancelWxLoginTask(oldTaskId))
-  if (wxQrObjectUrl) {
-    URL.revokeObjectURL(wxQrObjectUrl)
-    wxQrObjectUrl = ''
-  }
-  wxTaskId.value = ''
-  wxStatus.value = ''
-  wxError.value = ''
-  wxQrUrl.value = ''
-  wxLoading.value = false
-  wxPendingCode = ''
-  clearQrNameSubmitTimer()
-}
-
-function isWxFlowActive(taskId: string, flowVersion: number) {
-  return flowVersion === wxFlowVersion && taskId === wxTaskId.value
-}
-
-async function cancelWxLoginTask(taskId: string) {
-  await api.delete(`/api/wx-login/tasks/${taskId}`, { skipErrorToast: true } as any).catch(() => undefined)
-}
-
-async function getWxCodeAndAdd(taskId: string, flowVersion: number) {
-  if (!isWxFlowActive(taskId, flowVersion))
-    return
-  const codeResult = await api.post(`/api/wx-login/tasks/${taskId}/code`, undefined, { timeout: WX_LOGIN_REQUEST_TIMEOUT_MS, skipErrorToast: true } as any)
-  if (!isWxFlowActive(taskId, flowVersion))
-    return
-  const code = String(codeResult.data?.data?.code || '').trim()
-  const nickname = String(codeResult.data?.data?.nickname || '').trim()
-  if (!code)
-    throw new Error('未获取到登录 Code')
-
-  await addQrAccount('wx', code, nickname)
-}
-
-async function confirmWxLogin(taskId: string, flowVersion: number) {
-  if (!isWxFlowActive(taskId, flowVersion))
-    return
-  wxStatus.value = '正在建立登录会话...'
-  await api.post(`/api/wx-login/tasks/${taskId}/confirm`, undefined, { timeout: WX_LOGIN_REQUEST_TIMEOUT_MS, skipErrorToast: true } as any)
-  if (!isWxFlowActive(taskId, flowVersion))
-    return
-  await getWxCodeAndAdd(taskId, flowVersion)
-}
-
-async function pollWxLogin(taskId: string, flowVersion: number) {
-  if (!isWxFlowActive(taskId, flowVersion))
-    return
-
-  const controller = new AbortController()
-  wxPollController = controller
-  try {
-    const response = await api.get(`/api/wx-login/tasks/${taskId}/status`, {
-      timeout: 40000,
-      signal: controller.signal,
-      skipErrorToast: true,
-    } as any)
-    if (!isWxFlowActive(taskId, flowVersion))
-      return
-    const status = response.data?.data?.status
-    if (status === 'waiting') {
-      wxStatus.value = '等待微信扫码'
-    }
-    else if (status === 'scanned') {
-      wxStatus.value = '已扫码，请在手机上确认'
-    }
-    else if (status === 'authorized') {
-      stopWxPolling()
-      wxLoading.value = true
-      try {
-        await confirmWxLogin(taskId, flowVersion)
-      }
-      finally {
-        if (isWxFlowActive(taskId, flowVersion))
-          wxLoading.value = false
-      }
-      return
-    }
-    else if (['cancelled', 'expired', 'failed'].includes(status)) {
-      wxError.value = '二维码已失效，请重新获取'
-      return
-    }
-    wxPollTimer = setTimeout(() => void pollWxLogin(taskId, flowVersion), 1200)
-  }
-  catch (error: any) {
-    if (!isWxFlowActive(taskId, flowVersion) || error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED')
-      return
-    wxError.value = getApiErrorMessage(error, '登录状态检查失败')
-  }
-  finally {
-    if (wxPollController === controller)
-      wxPollController = undefined
-  }
-}
-
-function startWxLogin() {
-  if (!wechatQrLoginEnabled.value) {
-    activeLoginTab.value = 'code'
-    return
-  }
-  if (wxLoading.value)
-    return
-  resetWxLogin()
-  const flowVersion = wxFlowVersion
-  wxLoading.value = true
-  wxRequests = wxRequests.then(() => requestWxLogin(flowVersion))
-}
-
-async function requestWxLogin(flowVersion: number) {
-  if (flowVersion !== wxFlowVersion)
-    return
-  try {
-    const response = await api.post('/api/wx-login/tasks', { app_id: 'wx5306c5978fdb76e4' }, {
-      timeout: WX_LOGIN_REQUEST_TIMEOUT_MS,
-      skipErrorToast: true,
-    } as any)
-    const task = response.data?.data
-    const taskId = String(task?.task_id || '')
-    if (!taskId)
-      throw new Error('未创建登录任务')
-    if (flowVersion !== wxFlowVersion) {
-      await cancelWxLoginTask(taskId)
-      return
-    }
-    wxTaskId.value = taskId
-    const qrResponse = await api.get(task.qr_url, { responseType: 'blob', skipErrorToast: true } as any)
-    if (!isWxFlowActive(taskId, flowVersion))
-      return
-    wxQrObjectUrl = URL.createObjectURL(qrResponse.data)
-    wxQrUrl.value = wxQrObjectUrl
-    wxStatus.value = '等待微信扫码'
-    void pollWxLogin(taskId, flowVersion)
-  }
-  catch (error: any) {
-    if (flowVersion !== wxFlowVersion)
-      return
-    wxError.value = getApiErrorMessage(error, '二维码获取失败')
-  }
-  finally {
-    if (flowVersion === wxFlowVersion)
-      wxLoading.value = false
-  }
-}
-
-function stopQqPolling() {
-  if (qqTimer) {
-    clearTimeout(qqTimer)
-    qqTimer = undefined
-  }
-  qqPollController?.abort()
-  qqPollController = undefined
-}
-
-function resetQqLogin() {
-  const taskId = qqTaskId.value
-  qqFlowVersion += 1
-  stopQqPolling()
-  if (taskId)
-    qqRequests = qqRequests.then(() => cancelQqLoginTask(taskId))
-  qqTaskId.value = ''
-  qqStatus.value = ''
-  qqError.value = ''
-  qqQrUrl.value = ''
-  qqLoading.value = false
-  qqWaiting.value = false
-  qqPendingCode = ''
-  clearQrNameSubmitTimer()
-}
-
-function isQqFlowActive(taskId: string, flowVersion: number) {
-  return flowVersion === qqFlowVersion && taskId === qqTaskId.value
-}
-
-function ensureQqApiOk(response: any, fallback: string) {
-  const payload = response?.data
-  if (payload?.ok === false)
-    throw new Error(getApiErrorMessage(payload, fallback))
-  return payload
-}
-
-async function getQqCodeAndAdd(taskId: string, flowVersion: number) {
-  if (!isQqFlowActive(taskId, flowVersion))
-    return
-  qqLoading.value = true
-  qqStatus.value = '正在获取小程序授权 Code...'
-  try {
-    const response = await api.post(`/api/qq-login/tasks/${taskId}/code`, undefined, { timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS })
-    if (!isQqFlowActive(taskId, flowVersion))
-      return
-    const payload = ensureQqApiOk(response, '获取小程序授权 Code 失败')
-    const code = String(payload?.data?.code || '').trim()
-    const nickname = String(payload?.data?.nickname || '').trim()
-    if (!code)
-      throw new Error('未获取到登录 Code')
-    await addQrAccount('qq', code, nickname)
-  }
-  catch (error: any) {
-    if (isQqFlowActive(taskId, flowVersion))
-      qqError.value = getApiErrorMessage(error, '获取小程序授权 Code 失败')
-  }
-  finally {
-    if (isQqFlowActive(taskId, flowVersion))
-      qqLoading.value = false
-  }
-}
-
-async function cancelQqLoginTask(taskId: string) {
-  if (!taskId)
-    return
-  try {
-    const response = await api.post(`/api/qq-login/tasks/${taskId}/cancel`, undefined, {
-      timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS,
-      skipErrorToast: true,
-    } as any)
-    ensureQqApiOk(response, 'QQ 登录任务取消失败')
-  }
-  catch {}
-}
-
-async function pollQqLogin(taskId: string, flowVersion: number) {
-  if (!isQqFlowActive(taskId, flowVersion))
-    return
-
-  const controller = new AbortController()
-  qqPollController = controller
-  try {
-    const response = await api.post(`/api/qq-login/tasks/${taskId}/status`, undefined, {
-      timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS,
-      signal: controller.signal,
-      skipErrorToast: true,
-    } as any)
-    if (!isQqFlowActive(taskId, flowVersion))
-      return
-
-    const payload = ensureQqApiOk(response, 'QQ 登录状态检查失败')
-    const task = payload?.data
-    if (!task)
-      throw new Error('QQ 登录状态返回无效')
-    const status = String(task?.status || '').trim()
-    const qrImage = String(task?.qr_image || '').trim()
-    if (qrImage)
-      qqQrUrl.value = qrImage
-
-    if (status === 'waiting_scan') {
-      qqStatus.value = '等待 QQ 扫码'
-    }
-    else if (status === 'scanned') {
-      qqStatus.value = '已扫码，请在手机上确认'
-    }
-    else if (status === 'confirmed') {
-      stopQqPolling()
-      await getQqCodeAndAdd(taskId, flowVersion)
-      return
-    }
-    else if (['cancelled', 'expired', 'failed'].includes(status)) {
-      qqTaskId.value = ''
-      qqQrUrl.value = ''
-      qqStatus.value = ''
-      qqError.value = '二维码已失效，请重新获取'
-      return
-    }
-    if (!status) {
-      qqError.value = 'QQ 登录状态异常，请重新获取二维码'
-      return
-    }
-    qqTimer = setTimeout(() => void pollQqLogin(taskId, flowVersion), 1200)
-  }
-  catch (error: any) {
-    if (!isQqFlowActive(taskId, flowVersion) || error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED')
-      return
-    qqError.value = getApiErrorMessage(error, 'QQ 登录状态检查失败')
-  }
-  finally {
-    if (qqPollController === controller)
-      qqPollController = undefined
-  }
-}
-
-async function requestQqLogin(flowVersion: number) {
-  if (flowVersion !== qqFlowVersion)
-    return
-  qqLoading.value = true
-  try {
-    const response = await api.post('/api/qq-login/tasks', undefined, {
-      timeout: QQ_LOGIN_REQUEST_TIMEOUT_MS,
-      skipErrorToast: true,
-    } as any)
-    const payload = ensureQqApiOk(response, 'QQ 登录二维码获取失败')
-    const task = payload?.data
-    const taskId = String(task?.task_id || '')
-    const qrImage = String(task?.qr_image || '')
-    if (flowVersion !== qqFlowVersion) {
-      if (taskId)
-        await cancelQqLoginTask(taskId)
-      return
-    }
-    if (!taskId || !qrImage)
-      throw new Error('未创建 QQ 登录任务')
-    qqWaiting.value = false
-    qqTaskId.value = taskId
-    qqQrUrl.value = qrImage
-    qqStatus.value = '等待 QQ 扫码'
-    void pollQqLogin(taskId, flowVersion)
-  }
-  catch (error: any) {
-    if (flowVersion !== qqFlowVersion)
-      return
-    if (error?.response?.data?.errorType === 'qq_login_busy') {
-      qqWaiting.value = true
-      qqStatus.value = '扫码通道正在使用，空闲后会自动获取二维码'
-      qqTimer = setTimeout(() => {
-        qqRequests = qqRequests.then(() => requestQqLogin(flowVersion))
-      }, QQ_LOGIN_RETRY_MS)
-      return
-    }
-    qqWaiting.value = false
-    qqStatus.value = ''
-    qqError.value = error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT'
-      ? '获取 QQ 登录二维码超时，请稍后刷新二维码'
-      : getApiErrorMessage(error, 'QQ 登录二维码获取失败')
-  }
-  finally {
-    if (flowVersion === qqFlowVersion)
-      qqLoading.value = false
-  }
-}
-
-function startQqLogin() {
-  if (!qqQrLoginEnabled.value) {
-    activeLoginTab.value = 'code'
-    return
-  }
-  if (qqLoading.value)
-    return
-  resetQqLogin()
-  const flowVersion = qqFlowVersion
-  qqLoading.value = true
-  qqRequests = qqRequests.then(() => requestQqLogin(flowVersion))
 }
 
 function close() {
-  resetWxLogin()
-  resetQqLogin()
+  resetScan()
   emit('close')
 }
 
-watch(() => props.show, (newVal) => {
-  if (!newVal) {
-    resetWxLogin()
-    resetQqLogin()
-  }
-  else {
+watch(() => props.show, (show) => {
+  resetScan()
+  if (show) {
     errorMessage.value = ''
     activeLoginTab.value = 'code'
-    resetWxLogin()
+    form.name = props.editData?.name || ''
+    form.code = ''
+    form.platform = editPlatform.value
     void loadLoginSettings()
-    if (props.editData) {
-      form.name = props.editData.name || ''
-      form.code = ''
-      form.platform = props.editData.platform || 'qq'
-    }
-    else {
-      form.name = ''
-      form.code = ''
-      form.platform = 'qq'
-    }
   }
-})
+}, { immediate: true })
 
-watch(activeLoginTab, (tab) => {
-  if (!props.show)
-    return
-  if (tab === 'wx_qr' && wechatQrLoginEnabled.value && !wxTaskId.value)
-    void startWxLogin()
-  else if (tab === 'wx_qr' && !wechatQrLoginEnabled.value)
-    activeLoginTab.value = 'code'
-  else if (tab === 'qq_qr' && qqQrLoginEnabled.value && !qqTaskId.value)
-    void startQqLogin()
-  else if (tab === 'qq_qr' && !qqQrLoginEnabled.value)
-    activeLoginTab.value = 'code'
-  if (tab !== 'wx_qr')
-    resetWxLogin()
-  if (tab !== 'qq_qr')
-    resetQqLogin()
+watch(activeLoginTab, () => {
+  errorMessage.value = ''
+  resetScan()
 })
-
-watch(() => form.name, (name) => {
-  clearQrNameSubmitTimer()
-  if (!name.trim())
-    return
-  const platform = activeLoginTab.value === 'wx_qr'
-    ? 'wx'
-    : activeLoginTab.value === 'qq_qr' ? 'qq' : undefined
-  if (!platform || !(platform === 'wx' ? wxPendingCode : qqPendingCode))
-    return
-  qrNameSubmitTimer = setTimeout(() => void submitPendingQrAccount(platform), 800)
-})
-
-onBeforeUnmount(() => {
-  resetWxLogin()
-  resetQqLogin()
-})
-
-useEventListener('pagehide', () => {
-  const token = localStorage.getItem('admin_token')
-  if (!token)
-    return
-  const headers = { 'x-admin-token': token }
-  if (wxTaskId.value)
-    void fetch(`/api/wx-login/tasks/${wxTaskId.value}`, { method: 'DELETE', headers, keepalive: true }).catch(() => undefined)
-  if (qqTaskId.value)
-    void fetch(`/api/qq-login/tasks/${qqTaskId.value}/cancel`, { method: 'POST', headers, keepalive: true }).catch(() => undefined)
-})
+onBeforeUnmount(resetScan)
 </script>
 
 <template>
   <NModal
     :show="show"
-    :mask-closable="!loading && !wxLoading && !qqLoading"
-    :close-on-esc="!loading && !wxLoading && !qqLoading"
+    :mask-closable="!loading"
+    :close-on-esc="!loading"
     @update:show="value => !value && close()"
   >
     <NCard
       class="account-modal-card"
       :title="editData ? '编辑账号' : '添加账号'"
       :bordered="false"
-      :closable="!loading && !wxLoading && !qqLoading"
+      :closable="!loading"
       @close="close"
     >
       <div class="account-modal-content dialog-scroll overflow-y-auto">
@@ -676,10 +253,10 @@ useEventListener('pagehide', () => {
           <NTab name="code">
             输入 Code 登录
           </NTab>
-          <NTab v-if="wechatQrLoginEnabled" name="wx_qr">
+          <NTab v-if="availablePlatforms.wx" name="wx">
             微信扫码登录
           </NTab>
-          <NTab v-if="qqQrLoginEnabled" name="qq_qr">
+          <NTab v-if="availablePlatforms.qq" name="qq">
             QQ扫码登录
           </NTab>
         </NTabs>
@@ -721,63 +298,32 @@ useEventListener('pagehide', () => {
             </BaseButton>
           </div>
         </div>
-        <div v-else-if="activeLoginTab === 'wx_qr'" class="space-y-4" role="tabpanel" aria-label="微信扫码登录">
+        <div v-else class="space-y-4" role="tabpanel" :aria-label="scanLabel">
           <BaseInput
             v-model="form.name"
             label="账号备注（可留空）"
-            placeholder="留空时使用微信昵称"
+            :placeholder="editData ? '留空时保留原备注' : '留空时使用账号昵称'"
+            :maxlength="120"
+            :disabled="scanInProgress"
             class="farm-input"
           />
-          <div class="min-h-64 flex flex-col items-center justify-center gap-3">
-            <div v-if="wxQrUrl" class="bg-white p-2">
-              <img :src="wxQrUrl" alt="微信登录二维码" class="h-52 w-52">
+          <div v-if="scan || scanStarting || scanError" class="min-h-64 flex flex-col items-center justify-center gap-3">
+            <div v-if="scan?.qrImage" class="bg-white p-2">
+              <img :src="scan.qrImage" :alt="scanImageLabel" class="h-52 w-52">
             </div>
-            <div v-else class="h-52 w-52 flex items-center justify-center text-sm opacity-60">
-              {{ wxLoading ? '正在获取二维码...' : '二维码不可用' }}
-            </div>
-            <p class="text-sm" :style="{ color: 'var(--theme-text)' }">
-              {{ wxStatus }}
+            <p v-if="scanMessage" role="status" class="text-center text-sm" :style="{ color: 'var(--theme-text)' }">
+              {{ scanMessage }}
             </p>
-            <p v-if="wxError" class="text-sm text-red-500">
-              {{ wxError }}
+            <p v-if="scanError" role="alert" class="text-center text-sm text-red-500">
+              {{ scanError }}
             </p>
           </div>
           <div class="flex justify-end gap-2">
-            <BaseButton variant="outline" :loading="wxLoading" @click="startWxLogin">
-              刷新二维码
-            </BaseButton>
             <BaseButton variant="outline" @click="close">
-              取消
+              {{ finishingScan ? '关闭' : '取消' }}
             </BaseButton>
-          </div>
-        </div>
-        <div v-else-if="activeLoginTab === 'qq_qr'" class="space-y-4" role="tabpanel" aria-label="QQ扫码登录">
-          <BaseInput
-            v-model="form.name"
-            label="账号备注（可留空）"
-            placeholder="留空时使用 QQ 昵称"
-            class="farm-input"
-          />
-          <div class="min-h-64 flex flex-col items-center justify-center gap-3">
-            <div v-if="qqQrUrl" class="bg-white p-2">
-              <img :src="qqQrUrl" alt="QQ登录二维码" class="h-52 w-52">
-            </div>
-            <div v-else class="h-52 w-52 flex items-center justify-center text-sm opacity-60">
-              {{ qqWaiting ? '正在等待二维码…' : qqLoading ? '正在获取二维码…' : '二维码不可用' }}
-            </div>
-            <p class="text-sm" :style="{ color: 'var(--theme-text)' }">
-              {{ qqStatus }}
-            </p>
-            <p v-if="qqError" class="text-sm text-red-500">
-              {{ qqError }}
-            </p>
-          </div>
-          <div class="flex justify-end gap-2">
-            <BaseButton variant="outline" :loading="qqLoading" @click="startQqLogin">
-              刷新二维码
-            </BaseButton>
-            <BaseButton variant="outline" @click="close">
-              取消
+            <BaseButton v-if="!scan || !scanInProgress" variant="primary" :loading="scanStarting" @click="startScan">
+              {{ scan ? '重新获取二维码' : '获取二维码' }}
             </BaseButton>
           </div>
         </div>

@@ -1,6 +1,7 @@
 import type { Application } from 'express';
 import type { Server } from 'node:http';
 import type { Server as SocketIOServer } from 'socket.io';
+import type { createScanCoordinator } from '../../services/account-scan/coordinator';
 export {};
 
 const { createSessionStore } = require('../../models/session-store');
@@ -17,6 +18,7 @@ export interface AdminContext {
     server: Server | null;
     io: SocketIOServer | null;
     provider: any;
+    scanTasks?: ReturnType<typeof createScanCoordinator>;
 }
 
 function createAdminContext(dataProvider: any): AdminContext {

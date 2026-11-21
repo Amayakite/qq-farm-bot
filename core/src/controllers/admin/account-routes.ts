@@ -30,6 +30,24 @@ function accountResponse(data: any, auth: any): any {
     return isOwner(auth) ? { accounts, nextId: data.nextId } : { accounts };
 }
 
+export function persistAndLogAccount(ctx: AdminContext, payload: any, options: { updating: boolean; enableHosting: boolean; remarkRelogin?: boolean }) {
+    const data = addOrUpdateAccount(payload, { enableHosting: options.enableHosting });
+    const accountId = String(options.updating ? payload.id : data.accounts.at(-1)?.id || '');
+    const name = payload.name || accountId;
+    try {
+        ctx.provider.addAccountLog?.(options.updating ? 'update' : 'add',
+            options.remarkRelogin ? `通过备注重新登录账号: ${name}` : options.updating ? `更新账号: ${name}` : `添加账号: ${name}`,
+            accountId, payload.name || '');
+    } catch { /* The account is already saved even if a log subscriber failed. */ }
+    return { data, accountId };
+}
+
+export function activateSavedAccount(ctx: AdminContext, accountId: string, updating: boolean, hosting: boolean, name: string) {
+    if (hosting && updating) ctx.provider.restartAccount(accountId);
+    else if (hosting) ctx.provider.startAccount(accountId);
+    else if (updating) ctx.provider.setRuntimeAccountName?.(accountId, name);
+}
+
 function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
     // API: 账号管理
@@ -124,28 +142,8 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
 
             const enableHosting = suppliedCode && (!isUpdate || (existing && userStore.canRunAccounts(existing.ownerId)));
-            const data = addOrUpdateAccount(payload, { enableHosting });
-            if (ctx.provider.addAccountLog) {
-                const accountId = isUpdate ? String(payload.id) : String((data.accounts.at(-1) || {}).id || '');
-                const accountName = payload.name || '';
-                ctx.provider.addAccountLog(
-                    isUpdate ? 'update' : 'add',
-                    isRemarkRelogin
-                        ? `通过备注重新登录账号: ${accountName || accountId}`
-                        : isUpdate ? `更新账号: ${accountName || accountId}` : `添加账号: ${accountName || accountId}`,
-                    accountId,
-                    accountName
-                );
-            }
-            // 如果是新增，自动启动
-            if (enableHosting && !isUpdate) {
-                const newAcc = data.accounts.at(-1);
-                if (newAcc?.code) ctx.provider.startAccount(newAcc.id);
-            } else if (enableHosting) {
-                ctx.provider.restartAccount(payload.id);
-            } else if (isUpdate) {
-                ctx.provider.setRuntimeAccountName?.(payload.id, payload.name);
-            }
+            const { data, accountId } = persistAndLogAccount(ctx, payload, { updating: isUpdate, enableHosting, remarkRelogin: isRemarkRelogin });
+            activateSavedAccount(ctx, accountId, isUpdate, enableHosting, payload.name);
             res.json({
                 ok: true,
                 data: accountResponse(data, auth),
@@ -169,6 +167,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             if (typeof ctx.provider.clearLogs === 'function') ctx.provider.clearLogs(resolvedId);
             if (typeof ctx.provider.clearAccountLogs === 'function') ctx.provider.clearAccountLogs(resolvedId);
             const data = deleteAccount(resolvedId);
+            ctx.scanTasks?.cancelAccount(resolvedId);
             if (ctx.provider.addAccountLog) {
                 ctx.provider.addAccountLog('delete', `删除账号: ${(target && target.name) || req.params.id}`, resolvedId, target ? target.name : '');
             }
@@ -545,4 +544,4 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     });
 }
 
-module.exports = { mountAccountRoutes };
+module.exports = { mountAccountRoutes, persistAndLogAccount, activateSavedAccount };

@@ -247,7 +247,10 @@ function mountAuthRoutes(app: Application, ctx: AdminContext): void {
 
     app.post('/api/logout', (req: Request, res: Response) => {
         const token = (req as any).adminToken;
-        if (token) ctx.tokens.delete(token);
+        if (token) {
+            ctx.tokens.delete(token);
+            ctx.scanTasks?.cancelSession(token);
+        }
         if (ctx.io && token) {
             for (const socket of ctx.io.sockets.sockets.values()) {
                 if (String((socket.data as any).adminToken || '') === String(token)) socket.disconnect(true);

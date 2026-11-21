@@ -44,8 +44,11 @@ function storeCookies(cookies: Map<string, string>, headers: Headers): void {
     }
 }
 
-async function request(url: string, cookies: Map<string, string>, init: RequestInit = {}, timeout = 35_000): Promise<HttpResult> {
+async function request(url: string, cookies: Map<string, string>, init: RequestInit = {}, timeout = 35_000, signal?: AbortSignal): Promise<HttpResult> {
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
         let currentUrl = url;
@@ -69,6 +72,7 @@ async function request(url: string, cookies: Map<string, string>, init: RequestI
         }
         throw new Error('Too many redirects while contacting WeChat');
     } finally {
+        signal?.removeEventListener('abort', abort);
         clearTimeout(timer);
     }
 }
@@ -181,10 +185,10 @@ export class WxLoginService {
         return { session: { cookies, uuid }, qr: qr.body };
     }
 
-    async poll(session: WxLoginSession): Promise<ScanStatus> {
+    async poll(session: WxLoginSession, signal?: AbortSignal): Promise<ScanStatus> {
         if (session.oauthCode) return 'authorized';
         const params = new URLSearchParams({ uuid: session.uuid, _: String(Date.now()) });
-        const response = await request(`${QR_POLL_URL}?${params}`, session.cookies, {}, 35_000);
+        const response = await request(`${QR_POLL_URL}?${params}`, session.cookies, {}, 35_000, signal);
         if (response.status < 200 || response.status >= 300) throw new Error(`WeChat QR polling failed (HTTP ${response.status})`);
         const body = response.body.toString('utf8');
         const errcode = /wx_errcode\s*=\s*(\d+)/.exec(body)?.[1];
