@@ -1,4 +1,8 @@
 export {};
+/**
+ * @deprecated Owner credentials now live in `users.json` (see `user-store.ts`).
+ * Kept only for compatibility with older imports; the admin panel no longer uses it.
+ */
 const fs = require('node:fs');
 const { getDataFile, ensureDataDir } = require('../config/runtime-paths');
 const security = require('./auth-security');

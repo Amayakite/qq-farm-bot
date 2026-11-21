@@ -9,10 +9,7 @@ dist
 *.tgz
 .DS_Store
 Thumbs.db
-core/data/logs/*
-!core/data/logs/.gitkeep
-core/data/*.json
-!core/data/.gitkeep
+core/data/
 web/dist
 web/node_modules
 coverage

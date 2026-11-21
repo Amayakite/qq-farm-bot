@@ -143,7 +143,7 @@ function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options:
 
     if (cfg.automation && typeof cfg.automation === 'object') {
         for (const [k, v] of Object.entries(migrateRanchMarketAutomation(cfg.automation))) {
-            if ((next.automation as any)[k] === undefined) continue;
+            if (!Object.hasOwn(next.automation, k)) continue;
             if (k === 'fertilizer') {
                 next.automation.fertilizer = normalizeFertilizerMode(v, next.automation.fertilizer);
             } else if (k === 'fertilizer_land_types') {
@@ -168,7 +168,7 @@ function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options:
 
     if (cfg.intervals && typeof cfg.intervals === 'object') {
         for (const [type, sec] of Object.entries(cfg.intervals)) {
-            if ((next.intervals as any)[type] === undefined) continue;
+            if (!Object.hasOwn(next.intervals, type)) continue;
             (next.intervals as any)[type] = Math.max(1, Number.parseInt(sec as string, 10) || (next.intervals as any)[type] || 1);
         }
         next.intervals = normalizeIntervals(next.intervals);

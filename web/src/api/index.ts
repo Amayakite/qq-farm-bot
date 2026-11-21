@@ -15,10 +15,12 @@ export function normalizeApiErrorMessage(raw: unknown): string {
   if (!text)
     return ''
 
-  const codeMatch = text.match(/\bcode=\d+\b\s*(.*)$/)
-  const codeIndex = codeMatch?.index ?? -1
-  if (codeMatch?.[1] && codeIndex >= 0 && text.slice(0, codeIndex).includes('.'))
-    return codeMatch[1].trim()
+  const codeMatch = text.match(/\bcode=\d+\b/)
+  if (codeMatch && codeMatch.index !== undefined && text.slice(0, codeMatch.index).includes('.')) {
+    const rest = text.slice(codeMatch.index + codeMatch[0].length).trim()
+    if (rest)
+      return rest
+  }
   return text
 }
 
@@ -79,10 +81,39 @@ api.interceptors.response.use((response) => {
   if (error.response) {
     if (error.response.status === 401) {
       // Avoid redirect loop or multiple redirects
-      if (!window.location.pathname.includes('/login')) {
+      if (!window.location.pathname.includes('/login') && !window.location.pathname.startsWith('/renew')) {
+        let expiredTenant = false
+        try {
+          const cached = JSON.parse(localStorage.getItem('user_info') || 'null')
+          expiredTenant = cached?.role === 'tenant'
+            && typeof cached?.expiresAt === 'number'
+            && cached.expiresAt <= Date.now()
+        }
+        catch {
+          // ignore malformed cached user info
+        }
         tokenRef.value = ''
-        window.location.href = '/login'
-        toast.warning('登录已过期，请重新登录')
+        localStorage.removeItem('user_info')
+        window.location.href = expiredTenant ? '/renew?expired=1' : '/login'
+        toast.warning(expiredTenant ? '账号已到期，请续费' : '登录已过期，请重新登录')
+      }
+    }
+    else if (error.response.status === 403) {
+      const errorType = error.response.data?.errorType
+      if (errorType === 'tenant_expired' || errorType === 'tenant_disabled') {
+        tokenRef.value = ''
+        localStorage.removeItem('user_info')
+        const target = errorType === 'tenant_expired' ? '/renew?expired=1' : '/login?disabled=1'
+        if (!window.location.pathname.startsWith(errorType === 'tenant_expired' ? '/renew' : '/login')) {
+          window.location.href = target
+          toast.warning(errorType === 'tenant_expired' ? '账号已到期，请续费' : '账号已被停用')
+        }
+        return Promise.reject(error)
+      }
+      if (!skipToast) {
+        toast.error(errorType === 'owner_only'
+          ? '仅管理员可执行此操作'
+          : getApiErrorMessage(error, '没有权限执行此操作'))
       }
     }
     else if (error.response.status >= 500) {

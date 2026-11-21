@@ -8,6 +8,7 @@ export interface MenuItem {
     fullBleed?: boolean
     gameSpace?: 'ranch'
     ranchSection?: 'personal' | 'illustrated' | 'mall' | 'friends' | 'activity'
+    ownerOnly?: boolean
   }
 }
 
@@ -67,6 +68,14 @@ export const menuRoutes: MenuItem[] = [
     label: '游戏商城',
     icon: 'i-carbon-shopping-cart',
     component: () => import('@/views/GameMall.vue'),
+  },
+  {
+    path: 'admin/tenants',
+    name: 'admin-tenants',
+    label: '用户与激活码',
+    icon: 'i-carbon-user-admin',
+    component: () => import('@/views/AdminTenants.vue'),
+    meta: { ownerOnly: true },
   },
   {
     path: 'settings',

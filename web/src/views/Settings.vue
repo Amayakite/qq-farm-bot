@@ -34,6 +34,7 @@ const route = useRoute()
 const inRanch = computed(() => route.meta.gameSpace === 'ranch')
 const accountStore = useAccountStore()
 const userStore = useUserStore()
+const isOwner = computed(() => userStore.isOwner)
 const settingStore = useSettingStore()
 const statusStore = useStatusStore()
 
@@ -73,7 +74,10 @@ const tabs = [
   { key: 'system', label: '系统设置', icon: 'i-carbon-settings' },
 ] as const
 
-const visibleTabs = computed(() => inRanch.value ? tabs.filter(tab => ranchTabKeys.includes(tab.key)) : tabs)
+const visibleTabs = computed(() => {
+  const list = inRanch.value ? tabs.filter(tab => ranchTabKeys.includes(tab.key)) : tabs
+  return list.map(tab => tab.key === 'system' && !isOwner.value ? { ...tab, label: '账户设置' } : tab)
+})
 
 function setActiveTab(value: string) {
   if (tabs.some(tab => tab.key === value))
@@ -142,13 +146,15 @@ const stoppedAccounts = computed(() => accounts.value.filter((acc: any) => !acc.
 const stoppedAccountsCount = computed(() => stoppedAccounts.value.length)
 
 onMounted(async () => {
+  if (!userStore.userInfo)
+    await userStore.fetchUserInfo()
   await accountStore.fetchAccounts()
   if (!currentAccountId.value && accounts.value.length > 0 && accounts.value[0]) {
     accountStore.selectAccount(String(accounts.value[0].id))
   }
   if (currentAccountId.value)
     await loadStrategyData(currentAccountId.value)
-  await Promise.all([loadSystemConfig(), loadDevicePresets()])
+  await Promise.all([isOwner.value ? loadSystemConfig() : Promise.resolve(), loadDevicePresets()])
 })
 
 function openSettings(account: any) {
@@ -1237,7 +1243,6 @@ async function handleChangePassword() {
       showAlert('密码修改成功，请重新登录', 'primary')
       passwordForm.value = { old: '', new: '', confirm: '' }
       setTimeout(() => {
-        userStore.logout()
         window.location.href = '/login'
       }, 1500)
     }
@@ -1399,6 +1404,8 @@ function applyDevicePreset(presetId: string) {
 }
 
 async function loadSystemConfig() {
+  if (!isOwner.value)
+    return
   systemConfigLoading.value = true
   try {
     const { data } = await api.get('/api/settings/system-config')
@@ -1959,11 +1966,11 @@ async function handleResetSystemConfig() {
         <!-- 系统设置 -->
         <div v-else-if="activeTab === 'system'" class="space-y-4">
           <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100">
-            系统设置
+            {{ isOwner ? '系统设置' : '账户设置' }}
           </h3>
 
           <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
-            <section class="farm-card rounded-lg p-4">
+            <section v-if="isOwner" class="farm-card rounded-lg p-4">
               <div class="mb-4 flex items-start gap-3">
                 <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-900/25 dark:text-blue-400">
                   <span class="i-carbon-settings-adjust text-xl" />
@@ -2108,7 +2115,7 @@ async function handleResetSystemConfig() {
             </section>
 
             <div class="min-w-0 space-y-4">
-              <section class="farm-card rounded-lg p-4">
+              <section v-if="isOwner" class="farm-card rounded-lg p-4">
                 <div class="mb-4 flex items-start gap-3">
                   <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-600 dark:bg-violet-900/25 dark:text-violet-400">
                     <span class="i-carbon-login text-xl" />
@@ -2169,10 +2176,10 @@ async function handleResetSystemConfig() {
                   </div>
                   <div>
                     <h4 class="text-base text-gray-900 font-bold dark:text-gray-100">
-                      修改管理员密码
+                      {{ isOwner ? '修改管理员密码' : '修改登录密码' }}
                     </h4>
                     <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                      更新后台管理登录凭据
+                      {{ isOwner ? '更新后台管理登录凭据' : '更新你的登录密码' }}
                     </p>
                   </div>
                 </div>
@@ -2182,7 +2189,7 @@ async function handleResetSystemConfig() {
                     v-model="passwordForm.old"
                     label="当前密码"
                     type="password"
-                    placeholder="当前管理员密码"
+                    :placeholder="isOwner ? '当前管理员密码' : '当前登录密码'"
                   />
                   <BaseInput
                     v-model="passwordForm.new"
@@ -2205,12 +2212,12 @@ async function handleResetSystemConfig() {
                     :loading="passwordSaving"
                     @click="handleChangePassword"
                   >
-                    修改管理员密码
+                    {{ isOwner ? '修改管理员密码' : '修改登录密码' }}
                   </BaseButton>
                 </div>
               </section>
 
-              <section class="farm-card rounded-lg p-4">
+              <section v-if="isOwner" class="farm-card rounded-lg p-4">
                 <div class="mb-4 flex items-start gap-3">
                   <div class="h-9 w-9 flex shrink-0 items-center justify-center rounded-lg bg-green-50 text-green-600 dark:bg-green-900/25 dark:text-green-400">
                     <span class="i-carbon-notification text-xl" />

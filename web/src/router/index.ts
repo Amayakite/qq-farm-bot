@@ -2,6 +2,7 @@ import { useStorage } from '@vueuse/core'
 import axios from 'axios'
 import NProgress from 'nprogress'
 import { createRouter, createWebHistory } from 'vue-router'
+import { useUserStore } from '@/stores/user'
 import { allMenuRoutes } from './menu'
 import 'nprogress/nprogress.css'
 
@@ -10,6 +11,7 @@ NProgress.configure({ showSpinner: false })
 const adminToken = useStorage('admin_token', '')
 let validatedToken = ''
 let validatingPromise: Promise<boolean> | null = null
+let lastAuthErrorType = ''
 
 async function ensureTokenValid() {
   const token = String(adminToken.value || '').trim()
@@ -22,19 +24,33 @@ async function ensureTokenValid() {
   if (validatingPromise)
     return validatingPromise
 
+  lastAuthErrorType = ''
   validatingPromise = axios.get('/api/auth/validate', {
     headers: { 'x-admin-token': token },
     timeout: 6000,
   }).then((res) => {
     const ok = !!(res.data && res.data.ok)
-    if (ok)
+    if (ok) {
       validatedToken = token
+      useUserStore().userInfo = res.data.data.user
+    }
     return ok
-  }).catch(() => false).finally(() => {
+  }).catch((error) => {
+    lastAuthErrorType = String(error?.response?.data?.errorType || '')
+    return false
+  }).finally(() => {
     validatingPromise = null
   })
 
   return validatingPromise
+}
+
+function authFailureRoute() {
+  if (lastAuthErrorType === 'tenant_expired')
+    return { name: 'renew', query: { expired: '1' } }
+  if (lastAuthErrorType === 'tenant_disabled')
+    return { name: 'login', query: { disabled: '1' } }
+  return { name: 'login' }
 }
 
 const router = createRouter({
@@ -60,22 +76,35 @@ const router = createRouter({
       name: 'login',
       component: () => import('@/views/Login.vue'),
     },
+    {
+      path: '/redeem',
+      name: 'redeem',
+      component: () => import('@/views/Redeem.vue'),
+    },
+    {
+      path: '/renew',
+      name: 'renew',
+      component: () => import('@/views/Renew.vue'),
+    },
   ],
 })
+
+const PUBLIC_ROUTES = new Set(['login', 'redeem', 'renew'])
 
 router.beforeEach(async (to, _from) => {
   NProgress.start()
 
-  if (to.name === 'login') {
-    if (!adminToken.value) {
+  if (PUBLIC_ROUTES.has(String(to.name || ''))) {
+    // 兑换/续费页始终允许访问；登录页在已登录时回到面板。
+    if (to.name === 'login' && adminToken.value) {
+      const valid = await ensureTokenValid()
+      if (valid)
+        return useUserStore().userInfo?.mustChangePassword ? true : { name: 'dashboard' }
+      adminToken.value = ''
       validatedToken = ''
-      return true
+      if (lastAuthErrorType)
+        return authFailureRoute()
     }
-    const valid = await ensureTokenValid()
-    if (valid)
-      return { name: 'dashboard' }
-    adminToken.value = ''
-    validatedToken = ''
     return true
   }
 
@@ -88,7 +117,18 @@ router.beforeEach(async (to, _from) => {
   if (!valid) {
     adminToken.value = ''
     validatedToken = ''
+    return authFailureRoute()
+  }
+
+  if (useUserStore().userInfo?.mustChangePassword)
     return { name: 'login' }
+
+  if (to.meta.ownerOnly) {
+    const userStore = useUserStore()
+    if (!userStore.userInfo)
+      await userStore.fetchUserInfo()
+    if (!userStore.isOwner)
+      return { name: 'dashboard' }
   }
 
   return true

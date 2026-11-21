@@ -3,6 +3,7 @@ const { fork } = require('node:child_process');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
 const store = require('../models/store');
+const { canRunAccounts } = require('../models/user-store');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig } = require('../config/config');
 const { sendPushooMessage } = require('../services/push');
 const { createDataProvider } = require('./data-provider');
@@ -79,6 +80,10 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         addAccountLog,
         normalizeStatusForPanel,
         buildConfigSnapshotForAccount,
+        canStartAccount: (account: any) => {
+            const saved = store.getAccounts().accounts.find((item: any) => item.id === account.id);
+            return !!saved && canRunAccounts(saved.ownerId);
+        },
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
         sendConfiguredPush,

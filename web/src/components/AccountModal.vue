@@ -591,7 +591,7 @@ watch(() => props.show, (newVal) => {
     void loadLoginSettings()
     if (props.editData) {
       form.name = props.editData.name || ''
-      form.code = props.editData.code || ''
+      form.code = ''
       form.platform = props.editData.platform || 'qq'
     }
     else {

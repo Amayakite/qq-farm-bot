@@ -30,7 +30,7 @@ function saveAccounts(data: AccountsData): void {
     try {
         ensureDataDir();
         normalized = normalizeAccountsData(data);
-        writeJsonFileAtomic(ACCOUNTS_FILE, normalized);
+        writeJsonFileAtomic(ACCOUNTS_FILE, normalized, 2, 0o600);
     }
     catch (error: any) { throw storageError('保存', ACCOUNTS_FILE, error); }
     accountsCache = normalized;
@@ -46,7 +46,7 @@ function normalizeAccountsData(raw: unknown): AccountsData {
     const maxId = accounts.reduce((m: number, a: any) => Math.max(m, Number.parseInt(a && a.id, 10) || 0), 0);
     let nextId = Number.parseInt(data.nextId, 10);
     if (!Number.isFinite(nextId) || nextId <= 0) nextId = maxId + 1;
-    if (accounts.length === 0) nextId = 1;
+    // 多租户下账号 ID 必须保持单调递增，避免删除后复用 ID 串到其他租户的日志/配置。
     if (nextId <= maxId) nextId = maxId + 1;
     return { accounts, nextId };
 }
@@ -61,6 +61,7 @@ function normalizeAccount(raw: any): Account {
         uin: String(source.uin || ''),
         qq: String(source.qq || source.uin || ''),
         avatar: String(source.avatar || source.avatarUrl || ''),
+        ownerId: String(source.ownerId || 'owner'),
         createdAt: Number(source.createdAt) || Date.now(),
         updatedAt: Number(source.updatedAt) || Date.now(),
     };
@@ -75,7 +76,7 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
     let touchedAccountId = '';
     const source: any = acc || {};
     const cleanAccount: any = {};
-    for (const key of ['id', 'name', 'code', 'platform', 'uin', 'qq', 'avatar', 'avatarUrl', 'nick']) {
+    for (const key of ['id', 'name', 'code', 'platform', 'uin', 'qq', 'avatar', 'avatarUrl', 'nick', 'ownerId']) {
         if (source[key] !== undefined) cleanAccount[key] = source[key];
     }
     acc = cleanAccount;
@@ -96,6 +97,7 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }): Acc
             uin: acc.uin ? String(acc.uin) : '',
             qq: acc.qq ? String(acc.qq) : (acc.uin ? String(acc.uin) : ''),
             avatar: acc.avatar || acc.avatarUrl || '',
+            ownerId: String(acc.ownerId || 'owner'),
             createdAt: Date.now(),
             updatedAt: Date.now(),
         });
@@ -111,11 +113,8 @@ function deleteAccount(id: unknown): AccountsData {
     const { removeAccountConfig } = require('./account-config');
     const data = getAccounts();
     data.accounts = data.accounts.filter(a => a.id !== String(id));
-    if (data.accounts.length === 0) {
-        data.nextId = 1;
-    }
-    saveAccounts(data);
     removeAccountConfig(id);
+    saveAccounts(data);
     return data;
 }
 

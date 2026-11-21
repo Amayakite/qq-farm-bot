@@ -90,6 +90,20 @@ function createDataProvider(options: DataProviderOptions) {
         getAccountLogs: (limit: number) => accountLogs.slice(-limit).reverse(),
         addAccountLog: (action: string, msg: string, accountId?: string, accountName?: string, extra?: any) => addAccountLog(action, msg, accountId, accountName, extra),
 
+        // 删除账号时清掉该账号的历史审计日志，避免账号 ID 复用后串到其他租户。
+        clearAccountLogs: (accountRef: string) => {
+            const accountId = String(resolveAccountRefId(accountRef) || normalizeAccountRef(accountRef) || '');
+            if (!accountId) return 0;
+            let removed = 0;
+            for (let i = accountLogs.length - 1; i >= 0; i--) {
+                if (String(accountLogs[i]?.accountId || '') === accountId) {
+                    accountLogs.splice(i, 1);
+                    removed++;
+                }
+            }
+            return removed;
+        },
+
         clearLogs: (accountRef: string) => {
             const rawRef = normalizeAccountRef(accountRef);
             const accountId = resolveAccountRefId(accountRef);
@@ -430,8 +444,7 @@ function createDataProvider(options: DataProviderOptions) {
             const accountId = resolveAccountRefId(accountRef);
             const acc = findAccountByAnyRef(accountId || accountRef);
             if (!acc) return false;
-            startWorker(acc);
-            return true;
+            return startWorker(acc) || !!(workers[accountId] && !workers[accountId].stopping);
         },
 
         stopAccount: (accountRef: string) => {

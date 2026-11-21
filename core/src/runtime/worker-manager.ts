@@ -27,6 +27,7 @@ interface WorkerManagerOptions {
     addAccountLog: (action: string, msg: string, accountId?: string, accountName?: string, extra?: any) => void;
     normalizeStatusForPanel: (data: any, accountId: string, accountName: string) => any;
     buildConfigSnapshotForAccount: (accountId: string) => any;
+    canStartAccount?: (account: any) => boolean;
     getOfflineAutoDeleteMs: () => number;
     triggerOfflineReminder: (payload: any) => void;
     sendConfiguredPush?: (payload: any) => Promise<void> | void;
@@ -50,6 +51,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
         addAccountLog,
         normalizeStatusForPanel,
         buildConfigSnapshotForAccount,
+        canStartAccount,
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
         sendConfiguredPush,
@@ -59,6 +61,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
         onWorkerLog,
     } = options;
     const managerScheduler = createScheduler('worker_manager');
+    const pendingRestarts = new Map<string, () => void>();
     const useThreadRuntime = runtimeMode === 'thread' && !(processRef as any).pkg && typeof WorkerThread === 'function';
 
     function createThreadWorker(account: any): any {
@@ -104,6 +107,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
     function startWorker(account: any): boolean {
         if (!account || !account.id) return false;
         if (workers[account.id]) return false;
+        if (canStartAccount && !canStartAccount(account)) return false;
 
         log('系统', `正在启动账号: ${account.name}`, { accountId: String(account.id), accountName: account.name });
 
@@ -187,12 +191,13 @@ function createWorkerManager(options: WorkerManagerOptions) {
     }
 
     function stopWorker(accountId: string): void {
+        pendingRestarts.delete(accountId);
+        managerScheduler.clear(`restart_fallback_${accountId}`);
         const worker = workers[accountId];
-        if (!worker) return;
+        if (!worker || worker.stopping) return;
 
         const proc = worker.process;
         worker.stopping = true;
-        worker.process.send({ type: 'stop' });
         managerScheduler.setTimeoutTask(`force_kill_${accountId}`, 1000, () => {
             const current = workers[accountId];
             if (current && current.process === proc) {
@@ -200,6 +205,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 delete workers[accountId];
             }
         });
+        try { proc.send({ type: 'stop' }); } catch { /* The force-kill timer handles a closed IPC channel. */ }
     }
 
     function restartWorker(account: any): void {
@@ -208,10 +214,9 @@ function createWorkerManager(options: WorkerManagerOptions) {
         const worker = workers[accountId];
         if (!worker) { startWorker(account); return; }
         const proc = worker.process;
-        let started = false;
         const startOnce = () => {
-            if (started) return;
-            started = true;
+            if (pendingRestarts.get(accountId) !== startOnce) return;
+            pendingRestarts.delete(accountId);
             managerScheduler.clear(`restart_fallback_${accountId}`);
             const current = workers[accountId];
             if (!current) { startWorker(account); return; }
@@ -228,14 +233,15 @@ function createWorkerManager(options: WorkerManagerOptions) {
             delete workers[accountId];
             return true;
         };
+        stopWorker(accountId);
+        pendingRestarts.set(accountId, startOnce);
         if (typeof proc.exitCode === 'number' || proc.signalCode) {
             startOnce();
             return;
         }
         proc.once('exit', startOnce);
-        stopWorker(accountId);
         managerScheduler.setTimeoutTask(`restart_fallback_${accountId}`, 1500, () => {
-            if (started) return;
+            if (pendingRestarts.get(accountId) !== startOnce) return;
             killIfStale();
             startOnce();
         });

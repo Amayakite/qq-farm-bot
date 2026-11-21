@@ -19,6 +19,12 @@ services:
       - TZ=${TZ:-Asia/Shanghai}
       - NODE_ENV=production
       - ADMIN_PORT=3007
+      - HIDE_UPSTREAM_LINKS=${HIDE_UPSTREAM_LINKS:-0}
+      - SITE_NAME=${SITE_NAME:-QQ农场智能助手}
+      - SESSION_TTL_HOURS=${SESSION_TTL_HOURS:-168}
+      - DEFAULT_MAX_ACCOUNTS=${DEFAULT_MAX_ACCOUNTS:-3}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3007/api/game-version"]
       interval: 30s
