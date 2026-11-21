@@ -628,6 +628,7 @@ onMasterMessage(async (msg: any) => {
     } catch (e: any) {
         sendToMaster({
             type: 'error',
+            source: msg.type,
             error: {
                 message: String(e?.message || e || 'Worker error'),
                 code: e?.code,

@@ -11,7 +11,7 @@ import RemarkModal from '@/components/RemarkModal.vue'
 import BrandMark from '@/components/ui/BrandMark.vue'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { getSpaceMenu } from '@/router/menu'
-import { getPlatformClass, getPlatformLabel, useAccountStore } from '@/stores/account'
+import { getPlatformClass, getPlatformLabel, hostingLabel, useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { usePublicConfigStore } from '@/stores/public-config'
 import { useStatusStore } from '@/stores/status'
@@ -253,6 +253,13 @@ const displayName = computed(() => {
   return acc.uin
 })
 
+const currentHosting = computed(() => {
+  const account = currentAccount.value
+  if (!account)
+    return undefined
+  return (status.value?.accountId === account.id ? status.value?.hosting as typeof account.hosting : undefined) || account.hosting
+})
+
 const connectionStatus = computed(() => {
   if (isAdminRoute.value) {
     return {
@@ -275,6 +282,15 @@ const connectionStatus = computed(() => {
       text: '请添加账号',
       color: 'bg-gray-400',
       pulse: false,
+    }
+  }
+
+  const hosting = currentHosting.value
+  if (hosting) {
+    return {
+      text: hostingLabel(hosting.phase),
+      color: hosting.phase === 'online' ? 'bg-green-500' : hosting.needsCode ? 'bg-amber-500' : 'bg-gray-400',
+      pulse: hosting.phase === 'online' || hosting.phase === 'connecting',
     }
   }
 
@@ -687,7 +703,7 @@ async function copyToken() {
 
       <!-- Re-login prompt when account is stopped/disconnected -->
       <button
-        v-if="!isAdminRoute && connectionStatus.text === '未连接'"
+        v-if="!isAdminRoute && (currentHosting?.needsCode || connectionStatus.text === '未连接')"
         type="button"
         class="sidebar-relogin-btn mt-2 w-full flex items-center gap-2 rounded-xl px-3 py-2 text-sm transition-colors font-medium"
         @click="accountToEdit = currentAccount; showAccountModal = true; showAccountDropdown = false"

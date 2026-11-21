@@ -30,15 +30,22 @@ const expired = computed(() => tenants.value.filter(tenant => tenant.status === 
 const disabled = computed(() => tenants.value.filter(tenant => tenant.status === 'disabled'))
 const alerts = computed(() => {
   const list: Array<{ key: string, text: string, tone: 'warning' | 'danger' | 'info', to: string, action: string }> = []
-  if (expired.value.length)
-    list.push({ key: 'expired', text: `${expired.value.length} 个租户已到期，挂机已停止`, tone: 'danger', to: '/admin/tenants', action: '去延期' })
-  if (expiring.value.length)
-    list.push({ key: 'expiring', text: `${expiring.value.length} 个租户将在 7 天内到期`, tone: 'warning', to: '/admin/tenants', action: '查看' })
+  for (const tenant of expired.value.slice(0, 2)) {
+    list.push({ key: tenant.id, text: `${tenant.username} 已到期`, tone: 'danger', to: `/admin/tenants?manage=${encodeURIComponent(tenant.id)}&action=extend`, action: '延期' })
+  }
+  for (const tenant of expiring.value.slice(0, 2)) {
+    const id = encodeURIComponent(tenant.id)
+    list.push({ key: tenant.id, text: `${tenant.username} 将在 ${remainingDays(tenant.expiresAt)}内到期`, tone: 'warning', to: `/admin/tenants?tab=codes&tenant=${id}&issue=renew&target=${id}`, action: '发续费码' })
+  }
+  if (expired.value.length > 2)
+    list.push({ key: 'expired', text: `共 ${expired.value.length} 个租户已到期`, tone: 'danger', to: '/admin/tenants?filter=expired', action: '全部到期租户' })
+  if (expiring.value.length > 2)
+    list.push({ key: 'expiring', text: `共 ${expiring.value.length} 个租户即将到期`, tone: 'warning', to: '/admin/tenants?filter=expiring', action: '全部即将到期' })
   if (disabled.value.length)
-    list.push({ key: 'disabled', text: `${disabled.value.length} 个租户处于停用状态`, tone: 'info', to: '/admin/tenants', action: '查看' })
+    list.push({ key: 'disabled', text: `${disabled.value.length} 个租户处于停用状态`, tone: 'info', to: '/admin/tenants?filter=disabled', action: '查看' })
   if (Number(codeStats.value.unused) > 0)
     list.push({ key: 'codes', text: `${codeStats.value.unused} 个激活码未使用`, tone: 'info', to: '/admin/tenants?tab=codes', action: '查看' })
-  return list.slice(0, 4)
+  return list
 })
 
 const cards = computed(() => [
@@ -174,6 +181,9 @@ onMounted(load)
           <BaseButton variant="secondary" size="sm" to="/admin/tenants?tab=codes">
             激活码管理
           </BaseButton>
+          <BaseButton variant="secondary" size="sm" to="/admin/tenants?tab=audit">
+            管理员操作记录
+          </BaseButton>
         </div>
         <div class="mt-4 flex items-center gap-3 rounded-lg p-3" style="background: var(--ui-surface-soft);">
           <span class="brand-dot" :style="{ background: appStore.brandColor }" />
@@ -221,7 +231,9 @@ onMounted(load)
           <tbody>
             <tr v-for="tenant in tenants.slice(0, 8)" :key="tenant.id">
               <td class="font-medium">
-                {{ tenant.username }}
+                <RouterLink class="text-[var(--ui-primary)]" :to="{ path: '/admin/tenants', query: { manage: tenant.id } }">
+                  {{ tenant.username }}
+                </RouterLink>
               </td>
               <td><span class="status-pill" :class="tenantStatus(tenant).className">{{ tenantStatus(tenant).label }}</span></td>
               <td class="whitespace-nowrap text-xs">

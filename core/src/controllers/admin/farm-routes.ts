@@ -540,10 +540,13 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
 
             const ok = ctx.provider.startAccount(accountId);
             if (!ok) {
-                return res.status(404).json({ ok: false, error: 'Account not found' });
+                return res.status(503).json({ ok: false, error: '未能启动托管，可在首页查看账号状态' });
             }
             res.json({ ok: true });
         } catch (e: any) {
+            if (e?.code === 'relogin_required' || e?.code === 'tenant_unavailable') {
+                return res.status(409).json({ ok: false, error: e.message, errorType: e.code });
+            }
             handleApiError(res, e);
         }
     });

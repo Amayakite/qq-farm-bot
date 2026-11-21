@@ -140,6 +140,42 @@ function listCodes(filters: { status?: string; type?: string; batchId?: string }
         .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+function getPublicCode(id: unknown): PublicActivationCode | null {
+    const record = loadCodes().find(code => code.id === id);
+    return record ? publicCode(record) : null;
+}
+
+function listCodesPage(filters: {
+    status?: string; type?: string; batchId?: string; tenantId?: string; search?: string; page?: number; pageSize?: number;
+}) {
+    const codes = loadCodes();
+    const now = Date.now();
+    const search = (filters.search || '').trim().toLowerCase().slice(0, 200);
+    const matches: ActivationCodeRecord[] = [];
+    const batch = { unused: 0, revocable: 0 };
+    for (const record of codes) {
+        if (filters.batchId && record.batchId !== filters.batchId) continue;
+        const status = codeStatus(record, now);
+        if (filters.batchId && status === 'unused') batch.unused++;
+        if (filters.batchId && (status === 'unused' || status === 'expired')) batch.revocable++;
+        if ((filters.status && status !== filters.status) || (filters.type && record.type !== filters.type)) continue;
+        const redeemedBy = getCodeRedemption(record.id)?.redeemedBy || record.redeemedBy;
+        if (filters.tenantId && filters.tenantId !== redeemedBy && filters.tenantId !== record.targetTenantId) continue;
+        if (search && ![record.codeHint, record.note, record.batchId,
+            redeemedBy && getUserById(redeemedBy)?.username,
+            record.targetTenantId && getUserById(record.targetTenantId)?.username,
+        ].some(value => typeof value === 'string' && value.toLowerCase().includes(search))) continue;
+        matches.push(record);
+    }
+    const pageSize = Math.max(1, Math.min(100, Math.trunc(filters.pageSize) || 25));
+    const page = Math.max(1, Math.min(Math.ceil(matches.length / pageSize) || 1, Math.trunc(filters.page) || 1));
+    matches.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+    return {
+        items: matches.slice((page - 1) * pageSize, page * pageSize).map(publicCode),
+        total: matches.length, totalAll: codes.length, page, pageSize, batch,
+    };
+}
+
 function codeError(error: string, message: string): CodeError {
     return { ok: false, error, message };
 }
@@ -413,6 +449,8 @@ module.exports = {
     formatCode,
     loadCodes,
     listCodes,
+    listCodesPage,
+    getPublicCode,
     generateCodes,
     updateCode,
     replaceCode,

@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 
-function load(file, overrides = {}) {
+function load(file, overrides = {}, globals = {}) {
     const filename = path.resolve(__dirname, '../dist', file);
     const realRequire = require('node:module').createRequire(filename);
     const sandbox = {
@@ -13,10 +13,12 @@ function load(file, overrides = {}) {
         module: { exports: {} },
         exports: {},
         Buffer,
+        __dirname: path.dirname(filename),
         process,
         console,
         setTimeout,
         clearTimeout,
+        ...globals,
     };
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), sandbox, { filename });
     return sandbox.module.exports;
@@ -283,6 +285,129 @@ test('指定租户续费码仅由目标租户兑换，核销后保留原权益�
     assert.equal(codes.revokeBatch(batch.batchId).revoked, 1);
     assert.equal(codes.validateCode(code.code, 'renew').error, 'used_code');
     assert.equal(codes.validateCode(batch.codes[1].code, 'renew').error, 'revoked_code');
+});
+
+test('激活码分页和租户筛选返回稳定的记录与整批可操作数量', () => {
+    const dir = tempDir();
+    const users = loadUserStore(dir);
+    const tenant = users.createTenant({
+        username: 'paged_tenant', password: 'tenant-pass7',
+        expiresAt: Date.now() + 60_000, maxAccounts: 1,
+    }).user;
+    const codes = loadCodeStore(dir, users);
+    const issued = codes.generateCodes({ count: 30, type: 'renew', days: 7, targetTenantId: tenant.id });
+    const filters = { batchId: issued.batchId, search: 'paged_tenant', tenantId: tenant.id, pageSize: 25 };
+    const first = codes.listCodesPage({ ...filters, page: 1 });
+    const second = codes.listCodesPage({ ...filters, page: 2 });
+    assert.equal(first.total, 30);
+    assert.equal(first.items.length, 25);
+    assert.equal(second.items.length, 5);
+    assert.equal(new Set([...first.items, ...second.items].map(item => item.id)).size, 30);
+    assert.equal(codes.listCodesPage({ ...filters, status: 'redeemed' }).batch.revocable, 30);
+    assert.equal(codes.listCodesPage({ ...filters, status: 'redeemed' }).total, 0);
+});
+
+test('管理员操作记录可持久化并按类型和目标检索', () => {
+    const dir = tempDir();
+    const open = () => load('models/admin-audit-store.js', { '../config/runtime-paths': runtimePaths(dir) });
+    const audit = open();
+    audit.appendAudit({ actorId: 'owner', actor: 'admin', action: 'code.reveal', codeId: 'record-id' });
+    audit.appendAudit({ actorId: 'owner', actor: 'admin', action: 'tenant.quota', tenantId: 'tenant-id', username: 'friend' });
+    const restored = open();
+    const code = restored.listAudit({ category: 'code', search: 'RECORD-ID', page: 1 });
+    assert.equal(code.total, 1);
+    assert.equal(code.items[0].actor, 'admin');
+    assert.equal(code.items[0].code, undefined);
+    assert.equal(restored.listAudit({ category: 'tenant', search: 'friend' }).total, 1);
+});
+
+test('托管恢复读取备份中的开关，跳过停用租户和已使用的 Code，并允许取消排队', async () => {
+    const dir = tempDir();
+    const loadAccounts = pathToData => load('models/store/accounts.js', {
+        '../../config/runtime-paths': runtimePaths(pathToData),
+        './shared-state': { ACCOUNTS_FILE: path.join(pathToData, 'accounts.json') },
+        './account-config': { ensureAccountConfig() {}, removeAccountConfig() {} },
+    });
+    const accounts = loadAccounts(dir);
+    const users = loadUserStore(dir);
+    const tenant = users.createTenant({
+        username: 'disabled_tenant', password: 'tenant-pass7',
+        expiresAt: Date.now() + 60_000, maxAccounts: 2,
+    }).user;
+    users.updateTenant(tenant.id, { status: 'disabled' });
+    for (const [name, ownerId, enableHosting] of [
+        ['恢复', 'owner', true], ['手动停止', 'owner', false], ['停用租户', tenant.id, true],
+        ['缺少新码', 'owner', true], ['取消恢复', 'owner', true],
+    ]) {
+        accounts.addOrUpdateAccount({ name, ownerId, code: `fixture-${name}` }, { enableHosting });
+    }
+    accounts.setAccountRunState('4', { codeConsumed: true });
+    assert.equal(accounts.findAccountByRef('1').id, '1');
+    accounts.addOrUpdateAccount({ id: '1', qq: '2' });
+    assert.equal(accounts.findAccountByRef('2').id, '2');
+
+    const backup = tempDir();
+    const [delivery] = loadCodeStore(dir, users).generateCodes({ type: 'new' }).codes;
+    fs.cpSync(dir, backup, { recursive: true });
+    const restoredAccounts = loadAccounts(backup);
+    const restoredUsers = loadUserStore(backup);
+    assert.equal(loadCodeStore(backup, restoredUsers).revealCode(delivery.id).code, delivery.code);
+
+    const tasks = [];
+    const starts = [];
+    const { EventEmitter } = require('node:events');
+    class FixtureWorker extends EventEmitter {
+        constructor(_filename, options) {
+            super();
+            this.accountId = options.workerData.accountId;
+        }
+        postMessage(message) {
+            if (message.type === 'start') {
+                assert.equal(restoredAccounts.getAccountById(this.accountId).codeConsumed, true);
+                starts.push(this.accountId);
+            }
+            if (message.type === 'stop') this.emit('exit', 0);
+        }
+    }
+    const { createRuntimeEngine } = load('runtime/runtime-engine.js', {
+        'node:worker_threads': { Worker: FixtureWorker },
+        '../models/store': { ...restoredAccounts, getSystemConfig: () => null },
+        '../models/user-store': restoredUsers,
+        './runtime-state': { createRuntimeState: () => ({
+            workers: {}, globalLogs: [], accountLogs: [], runtimeEvents: new EventEmitter(),
+            buildConfigSnapshotForAccount: () => ({}),
+            normalizeStatusForPanel: status => status,
+            buildDefaultStatus: id => ({ accountId: id, connection: { connected: false } }),
+            log() {}, addAccountLog() {},
+        }) },
+        './relogin-reminder': { createReloginReminderService: () => ({ getOfflineAutoDeleteMs: () => Infinity, triggerOfflineReminder() {} }) },
+    }, {
+        setTimeout: callback => { tasks.push(callback); return { unref() {} }; },
+    });
+    const engine = createRuntimeEngine({ runtimeMode: 'thread' });
+    await engine.start({ startAdminServer: false });
+    assert.equal(engine.dataProvider.getStatus('1').hosting.phase, 'queued');
+    assert.equal(engine.dataProvider.getStatus('2').hosting.phase, 'stopped');
+    assert.equal(engine.dataProvider.getStatus('3').hosting.phase, 'suspended');
+    assert.equal(engine.dataProvider.getStatus('4').hosting.phase, 'relogin_required');
+    assert.throws(() => engine.dataProvider.startAccount('4'), { code: 'relogin_required' });
+    engine.dataProvider.stopAccount('5');
+    while (tasks.length) tasks.shift()();
+    assert.deepEqual(starts, ['1']);
+    assert.equal(restoredAccounts.getAccountById('5').runEnabled, false);
+    assert.equal(engine.dataProvider.getStatus('1').hosting.phase, 'connecting');
+    restoredUsers.updateTenant(tenant.id, { status: 'active' });
+    engine.dataProvider.recoverTenantAccounts(tenant.id);
+    assert.equal(engine.dataProvider.getStatus('3').hosting.phase, 'queued');
+    while (tasks.length) tasks.shift()();
+    assert.deepEqual(starts, ['1', '3']);
+    engine.workers['1'].process.emit('message', { type: 'account_disconnected', source: 'ws_error', code: 400 });
+    assert.equal(engine.dataProvider.getStatus('1').hosting.issue.reason, 'login_required');
+    assert.equal(restoredAccounts.getAccountById('1').runEnabled, true);
+    restoredAccounts.addOrUpdateAccount({ id: '1', code: 'fresh-fixture' });
+    engine.dataProvider.restartAccount('1');
+    assert.deepEqual(starts, ['1', '3', '1']);
+    engine.stopAllAccounts();
 });
 
 test('登录失败的锁定在进程重启后保留，且按客户端来源隔离', () => {

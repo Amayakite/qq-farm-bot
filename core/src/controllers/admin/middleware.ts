@@ -118,6 +118,9 @@ function filterAccountsForAuth(accounts: any[], auth?: AuthContext | null): any[
 }
 
 function getAccountList(ctx: AdminContext, auth?: AuthContext | null): any[] {
+    if (auth && !isOwner(auth) && typeof ctx.provider?.getAccountsByOwner === 'function') {
+        return filterAccountsForAuth(ctx.provider.getAccountsByOwner(String(auth.user.id)), auth);
+    }
     return filterAccountsForAuth(rawAccountList(ctx), auth);
 }
 
@@ -168,7 +171,8 @@ function handleApiError(res: Response, err: any): void {
 function resolveAccId(ctx: AdminContext, rawRef: any, auth?: AuthContext | null): string {
     const input = normalizeAccountRef(rawRef);
     if (!input || !auth) return '';
-    const match = findAccountByRef(rawAccountList(ctx), input);
+    const match = typeof ctx.provider?.resolveAccountAccess === 'function'
+        ? ctx.provider.resolveAccountAccess(input) : findAccountByRef(rawAccountList(ctx), input);
     return filterAccountsForAuth(match ? [match] : [], auth).length ? String(match.id || '') : '';
 }
 
@@ -200,6 +204,7 @@ module.exports = {
     createAuthRequired,
     requireOwner,
     getAccountList,
+    rawAccountList,
     getAccountIds,
     filterAccountsForAuth,
     isSoftRuntimeError,

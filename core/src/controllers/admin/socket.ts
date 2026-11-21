@@ -39,6 +39,7 @@ function ownedAccountIds(ctx: AdminContext, auth: any): string[] {
 }
 
 function collectLogsForAccounts(ctx: AdminContext, accountIds: string[], limit: number): any[] {
+    if (typeof ctx.provider?.getLogsForAccounts === 'function') return ctx.provider.getLogsForAccounts(accountIds, { limit });
     if (!ctx.provider || typeof ctx.provider.getLogs !== 'function') return [];
     const logs: any[] = [];
     for (const accountId of accountIds) {
@@ -168,12 +169,14 @@ function forAccountSubscribers(ctx: AdminContext, id: string, deliver: (socket: 
     if (!ctx.io || !id) return;
     const { sockets, adapter } = ctx.io.sockets;
     const subscribers = new Set([...(adapter.rooms.get(`account:${id}`) || []), ...(adapter.rooms.get(OWNER_ALL_ROOM) || [])]);
+    const indexedOwnership = typeof ctx.provider?.getAccountOwnerId === 'function';
+    const ownerId = indexedOwnership && subscribers.size ? ctx.provider.getAccountOwnerId(id) : '';
     for (const socketId of subscribers) {
         const socket = sockets.get(socketId);
         if (!socket) continue;
         const auth = currentSocketAuth(ctx, socket);
         if (!auth) continue;
-        if (!isOwner(auth) && resolveAccId(ctx, id, auth) !== id) {
+        if (!isOwner(auth) && (indexedOwnership ? ownerId !== auth.user.id : resolveAccId(ctx, id, auth) !== id)) {
             socket.leave(`account:${id}`);
             continue;
         }

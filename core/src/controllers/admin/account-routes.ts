@@ -1,5 +1,6 @@
 import type { Application, Request, Response } from 'express';
 import type { AdminContext } from './context';
+import { requiresNewCode } from '../../types/account';
 export {};
 
 /**
@@ -25,7 +26,7 @@ const {
 
 function accountResponse(data: any, auth: any): any {
     const accounts = filterAccountsForAuth(data?.accounts, auth)
-        .map(({ code: _code, ...account }: any) => account);
+        .map(({ code: _code, codeConsumed: _codeConsumed, ...account }: any) => account);
     return isOwner(auth) ? { accounts, nextId: data.nextId } : { accounts };
 }
 
@@ -34,10 +35,11 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     // API: 账号管理
     app.get('/api/accounts', (req: Request, res: Response) => {
         try {
-            const data = ctx.provider.getAccounts();
+            const auth = (req as any).auth;
+            const data = isOwner(auth) ? ctx.provider.getAccounts() : { accounts: getAccountList(ctx, auth) };
             res.json({
                 ok: true,
-                data: accountResponse(data, (req as any).auth),
+                data: accountResponse(data, auth),
             });
         } catch (e: any) {
             handleApiError(res, e);
@@ -99,6 +101,11 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
             const payload: any = isUpdate ? { ...body, id: resolvedUpdateId } : { ...body };
             const existing = isUpdate ? visibleAccounts.find((account: any) => String(account.id) === resolvedUpdateId) : null;
+            const suppliedCode = typeof payload.code === 'string' && !!payload.code.trim();
+            if (suppliedCode) payload.code = payload.code.trim();
+            if (suppliedCode && payload.code === existing?.code && (existing.codeConsumed || requiresNewCode(existing.lastRunIssue))) {
+                return res.status(409).json({ ok: false, error: '请提供新的登录 Code 或重新扫码', errorType: 'relogin_required' });
+            }
             delete payload.ownerId;
             if (!isUpdate) {
                 const user = userStore.getUserById(requestedOwnerId);
@@ -116,23 +123,8 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                 payload.ownerId = requestedOwnerId;
             }
 
-            let wasRunning = false;
-            if (isUpdate && ctx.provider.isAccountRunning) {
-                wasRunning = ctx.provider.isAccountRunning(payload.id);
-            }
-
-            // 检查是否仅修改了备注信息
-            let onlyRemarkChanged = false;
-            if (isUpdate && existing) {
-                // 检查 payload 中是否只包含 id 和 name 字段
-                const payloadKeys = Object.keys(payload);
-                const onlyIdAndName = payloadKeys.length === 2 && payloadKeys.includes('id') && payloadKeys.includes('name');
-                if (onlyIdAndName) {
-                    onlyRemarkChanged = true;
-                }
-            }
-
-            const data = addOrUpdateAccount(payload);
+            const enableHosting = suppliedCode && (!isUpdate || (existing && userStore.canRunAccounts(existing.ownerId)));
+            const data = addOrUpdateAccount(payload, { enableHosting });
             if (ctx.provider.addAccountLog) {
                 const accountId = isUpdate ? String(payload.id) : String((data.accounts.at(-1) || {}).id || '');
                 const accountName = payload.name || '';
@@ -146,15 +138,13 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                 );
             }
             // 如果是新增，自动启动
-            if (!isUpdate) {
+            if (enableHosting && !isUpdate) {
                 const newAcc = data.accounts.at(-1);
-                if (newAcc) ctx.provider.startAccount(newAcc.id);
-            } else if (isRemarkRelogin) {
-                // Adding with an existing remark is a relogin operation, including for stopped accounts.
+                if (newAcc?.code) ctx.provider.startAccount(newAcc.id);
+            } else if (enableHosting) {
                 ctx.provider.restartAccount(payload.id);
-            } else if (wasRunning && !onlyRemarkChanged) {
-                // 如果是更新，且之前在运行，且不是仅修改备注，则重启
-                ctx.provider.restartAccount(payload.id);
+            } else if (isUpdate) {
+                ctx.provider.setRuntimeAccountName?.(payload.id, payload.name);
             }
             res.json({
                 ok: true,
@@ -229,6 +219,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         // 如果没有指定账号ID，获取当前用户可见账号的日志
         if (!id) {
             const accountIds = getAccountIds(ctx, (req as any).auth);
+            if (typeof ctx.provider.getLogsForAccounts === 'function') {
+                return res.json({ ok: true, data: ctx.provider.getLogsForAccounts(accountIds, options) });
+            }
             const allLogs: any[] = [];
 
             for (const accId of accountIds) {

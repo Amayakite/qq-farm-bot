@@ -3,6 +3,13 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import api from '@/api'
 
+export interface HostingStatus {
+  phase: 'stopped' | 'suspended' | 'queued' | 'connecting' | 'online' | 'offline' | 'relogin_required'
+  runEnabled: boolean
+  needsCode: boolean
+  issue: { reason: 'login_required' | 'kicked' | 'session_lost' | 'disconnected' | 'worker_failed', at: number } | null
+}
+
 export interface Account {
   id: string
   name: string
@@ -11,7 +18,26 @@ export interface Account {
   avatar?: string
   platform?: string
   running?: boolean
+  hosting?: HostingStatus
   // Add other fields as discovered
+}
+
+const hostingLabels: Record<HostingStatus['phase'], string> = {
+  stopped: '已停止',
+  suspended: '已暂停',
+  queued: '等待恢复',
+  connecting: '连接中',
+  online: '在线托管',
+  offline: '已离线',
+  relogin_required: '待重新登录',
+}
+
+export function hostingLabel(phase: HostingStatus['phase']): string {
+  return hostingLabels[phase]
+}
+
+export function hostingEnabled(account: Account): boolean {
+  return account.hosting?.runEnabled ?? !!account.running
 }
 
 export interface AccountLog {

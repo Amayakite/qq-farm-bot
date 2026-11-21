@@ -15,7 +15,7 @@ import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
-import { getPlatformClass, getPlatformLabel, useAccountStore } from '@/stores/account'
+import { getPlatformClass, getPlatformLabel, hostingEnabled, hostingLabel, useAccountStore } from '@/stores/account'
 import { useSettingStore } from '@/stores/setting'
 import { useStatusStore } from '@/stores/status'
 import { useUserStore } from '@/stores/user'
@@ -142,7 +142,7 @@ function handleAccountAvatarError(account: any) {
     accountAvatarErrors.value.add(accountId)
 }
 
-const stoppedAccounts = computed(() => accounts.value.filter((acc: any) => !acc.running))
+const stoppedAccounts = computed(() => accounts.value.filter(acc => !hostingEnabled(acc)))
 const stoppedAccountsCount = computed(() => stoppedAccounts.value.length)
 
 onMounted(async () => {
@@ -192,7 +192,7 @@ async function confirmDelete() {
 }
 
 async function toggleAccount(account: any) {
-  if (account.running) {
+  if (hostingEnabled(account)) {
     await accountStore.stopAccount(account.id)
   }
   else {
@@ -1595,17 +1595,17 @@ async function handleResetSystemConfig() {
                 <div class="flex items-center justify-end gap-2 sm:flex-col sm:items-end">
                   <span class="flex items-center gap-1 text-xs text-gray-500 sm:hidden">
                     <div class="h-2 w-2 rounded-full" :class="acc.running ? 'bg-green-500' : 'bg-gray-300'" />
-                    {{ acc.running ? '运行中' : '已停止' }}
+                    {{ acc.hosting ? hostingLabel(acc.hosting.phase) : acc.running ? '运行中' : '已停止' }}
                   </span>
                   <BaseButton
                     variant="secondary"
                     size="sm"
                     class="border rounded-full shadow-sm transition-all duration-500 ease-in-out sm:w-20 active:scale-95"
-                    :class="acc.running ? 'border-red-200 bg-red-50 text-red-600 hover:bg-red-100 focus:ring-red-500 active:border-red-300 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 dark:focus:ring-red-500 dark:active:border-red-700' : 'border-green-200 bg-green-50 text-green-600 hover:bg-green-100 focus:ring-green-500 active:border-green-300 dark:border-green-800 dark:bg-green-900/20 dark:text-green-400 dark:hover:bg-green-900/30 dark:focus:ring-green-500 dark:active:border-green-700'"
+                    :class="hostingEnabled(acc) ? 'border-red-200 bg-red-50 text-red-600 hover:bg-red-100 focus:ring-red-500 active:border-red-300 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 dark:focus:ring-red-500 dark:active:border-red-700' : 'border-green-200 bg-green-50 text-green-600 hover:bg-green-100 focus:ring-green-500 active:border-green-300 dark:border-green-800 dark:bg-green-900/20 dark:text-green-400 dark:hover:bg-green-900/30 dark:focus:ring-green-500 dark:active:border-green-700'"
                     @click="toggleAccount(acc)"
                   >
-                    <span class="mr-1" :class="acc.running ? 'i-carbon-stop-filled' : 'i-carbon-play-filled'" />
-                    {{ acc.running ? '停止' : '启动' }}
+                    <span class="mr-1" :class="hostingEnabled(acc) ? 'i-carbon-stop-filled' : 'i-carbon-play-filled'" />
+                    {{ hostingEnabled(acc) ? '停止' : '启动' }}
                   </BaseButton>
                 </div>
               </div>
@@ -1614,7 +1614,7 @@ async function handleResetSystemConfig() {
                 <div class="hidden items-center gap-2 text-sm text-gray-500 sm:flex">
                   <span class="flex items-center gap-1">
                     <div class="h-2 w-2 rounded-full" :class="acc.running ? 'bg-green-500' : 'bg-gray-300'" />
-                    {{ acc.running ? '运行中' : '已停止' }}
+                    {{ acc.hosting ? hostingLabel(acc.hosting.phase) : acc.running ? '运行中' : '已停止' }}
                   </span>
                 </div>
 

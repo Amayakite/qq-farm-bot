@@ -1,3 +1,5 @@
+import { requiresNewCode } from '../types/account';
+import type { Account, AccountIssueReason } from '../types/account';
 export {};
 const { fork } = require('node:child_process');
 const path = require('node:path');
@@ -36,6 +38,9 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
     const onLog = typeof options.onLog === 'function' ? options.onLog : null;
     const onAccountLog = typeof options.onAccountLog === 'function' ? options.onAccountLog : null;
     const startAdminServer = typeof options.startAdminServer === 'function' ? options.startAdminServer : null;
+    const recoveryIntervalMs = Math.max(500, Math.min(60_000, Number(processRef.env.FARM_RESTORE_INTERVAL_MS) || 1500));
+    const recoveryQueue = new Set<string>();
+    let recoveryTimer: NodeJS.Timeout | undefined;
 
     const runtimeState = createRuntimeState({
         store,
@@ -80,19 +85,19 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         addAccountLog,
         normalizeStatusForPanel,
         buildConfigSnapshotForAccount,
-        canStartAccount: (account: any) => {
-            const saved = store.getAccounts().accounts.find((item: any) => item.id === account.id);
-            return !!saved && canRunAccounts(saved.ownerId);
+        canStartAccount: (account: Account) => {
+            const saved = store.getAccountById(account.id);
+            return !!saved && saved.code === account.code && shouldRestore(saved);
         },
+        // Make the one-time Code unavailable before it can reach the worker.
+        claimLoginCode: (account: Account) => store.setAccountRunState(account.id, { codeConsumed: true }),
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
         sendConfiguredPush,
         addOrUpdateAccount: store.addOrUpdateAccount,
         deleteAccount: store.deleteAccount,
-        onStatusSync: (accountId: string, status: any, accountName?: string) => {
-            runtimeEvents.emit('status', { accountId, status, accountName });
-            if (onStatusSync) onStatusSync(accountId, status, accountName);
-        },
+        onStatusSync: publishAccountStatus,
+        onRunIssue: recordRunIssue,
         onWorkerLog: (entry: any, accountId: string, accountName?: string) => {
             runtimeEvents.emit('worker_log', { entry, accountId, accountName });
             if (onLog) onLog(entry, accountId, accountName);
@@ -116,6 +121,11 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         startWorker,
         stopWorker,
         restartWorker,
+        canRunAccount: (account: Account) => canRunAccounts(account.ownerId),
+        isRecoveryQueued: (id: string) => recoveryQueue.has(id),
+        cancelRecovery: (id: string) => recoveryQueue.delete(id),
+        recoverTenantAccounts: queueAccountsForRecovery,
+        onRunStateChanged: publishAccountStatus,
     });
 
     runtimeEvents.on('log', (entry: any) => {
@@ -148,14 +158,64 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         }
     }
 
-    function startAllAccounts(): void {
-        const accounts = (store.getAccounts().accounts || []);
-        if (accounts.length > 0) {
-            log('系统', `发现 ${accounts.length} 个账号，正在启动...`);
-            accounts.forEach((acc: any) => startWorker(acc));
-        } else {
-            log('系统', '未发现账号，请访问管理面板添加账号');
+    function publishAccountStatus(accountId: string, liveStatus?: any, name?: string): void {
+        const account = store.getAccountById(accountId);
+        if (!account) return;
+        const status = liveStatus
+            ? { ...liveStatus, hosting: dataProvider.getAccountHosting(accountId), wsError: workers[accountId]?.wsError || null }
+            : dataProvider.getStatus(accountId);
+        const accountName = name || account.name;
+        runtimeEvents.emit('status', { accountId, status, accountName });
+        onStatusSync?.(accountId, status, accountName);
+    }
+
+    function recordRunIssue(id: string, reason: AccountIssueReason | null): void {
+        try {
+            store.setAccountRunState(id, { lastRunIssue: reason ? { reason, at: Date.now() } : null });
+        } catch (error: any) {
+            log('错误', '保存托管状态失败', { accountId: id, reason: error?.message });
         }
+        if (reason) publishAccountStatus(id);
+    }
+
+    function shouldRestore(account: Account): boolean {
+        return account.runEnabled && !!account.code && !account.codeConsumed && !requiresNewCode(account.lastRunIssue) && canRunAccounts(account.ownerId);
+    }
+
+    function scheduleRecovery(): void {
+        if (recoveryTimer || !recoveryQueue.size) return;
+        recoveryTimer = setTimeout(() => {
+            recoveryTimer = undefined;
+            const id = recoveryQueue.values().next().value;
+            if (!id) return;
+            recoveryQueue.delete(id);
+            try {
+                const account = store.getAccountById(id);
+                if (account && shouldRestore(account)) {
+                    if (workers[id]?.stopping) recoveryQueue.add(id);
+                    else if (!workers[id]) startWorker(account);
+                }
+            } catch (error: any) {
+                log('错误', '恢复账号托管失败', { accountId: id, reason: error?.message });
+            }
+            scheduleRecovery();
+        }, recoveryIntervalMs);
+        recoveryTimer.unref();
+    }
+
+    function queueAccountsForRecovery(ownerId?: string): void {
+        try {
+            const accounts: Account[] = ownerId ? store.getAccountsByOwner(ownerId) : store.getAccounts().accounts;
+            for (const account of accounts) {
+                const worker = workers[account.id];
+                if (!shouldRestore(account) || (worker && !worker.stopping) || recoveryQueue.has(account.id)) continue;
+                recoveryQueue.add(account.id);
+                publishAccountStatus(account.id);
+            }
+        } catch (error: any) {
+            log('错误', '读取待恢复账号失败', { reason: error?.message });
+        }
+        scheduleRecovery();
     }
 
     async function start(options: { startAdminServer?: boolean; autoStartAccounts?: boolean } = {}): Promise<void> {
@@ -173,11 +233,14 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         }
 
         if (shouldAutoStartAccounts) {
-            startAllAccounts();
+            queueAccountsForRecovery();
         }
     }
 
     function stopAllAccounts(): void {
+        if (recoveryTimer) clearTimeout(recoveryTimer);
+        recoveryTimer = undefined;
+        recoveryQueue.clear();
         for (const accountId of Object.keys(workers)) {
             stopWorker(accountId);
         }
@@ -189,7 +252,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         workers,
         dataProvider,
         start,
-        startAllAccounts,
+        startAllAccounts: queueAccountsForRecovery,
         stopAllAccounts,
         broadcastConfigToWorkers,
         broadcastGameConfigReload,

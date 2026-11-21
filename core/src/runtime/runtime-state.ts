@@ -45,7 +45,7 @@ function createRuntimeState(options: RuntimeStateOptions) {
         operationKeys = [],
     } = options;
 
-    const workers: Record<string, any> = {};
+    const workers: Record<string, any> = Object.create(null);
     const globalLogs: LogEntry[] = [];
     const accountLogs: AccountLogEntry[] = [];
     const runtimeEvents = new EventEmitter();

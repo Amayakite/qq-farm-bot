@@ -1,3 +1,4 @@
+import type { AccountIssueReason } from '../types/account';
 export {};
 const { createScheduler } = require('../services/scheduler');
 
@@ -28,12 +29,14 @@ interface WorkerManagerOptions {
     normalizeStatusForPanel: (data: any, accountId: string, accountName: string) => any;
     buildConfigSnapshotForAccount: (accountId: string) => any;
     canStartAccount?: (account: any) => boolean;
+    claimLoginCode?: (account: any) => void;
     getOfflineAutoDeleteMs: () => number;
     triggerOfflineReminder: (payload: any) => void;
     sendConfiguredPush?: (payload: any) => Promise<void> | void;
     addOrUpdateAccount: (acc: any) => any;
     deleteAccount: (id: string) => void;
     onStatusSync?: (accountId: string, status: any, accountName?: string) => void;
+    onRunIssue?: (accountId: string, reason: AccountIssueReason | null) => void;
     onWorkerLog?: (entry: any, accountId: string, accountName?: string) => void;
 }
 
@@ -52,12 +55,14 @@ function createWorkerManager(options: WorkerManagerOptions) {
         normalizeStatusForPanel,
         buildConfigSnapshotForAccount,
         canStartAccount,
+        claimLoginCode,
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
         sendConfiguredPush,
         addOrUpdateAccount,
         deleteAccount,
         onStatusSync,
+        onRunIssue,
         onWorkerLog,
     } = options;
     const managerScheduler = createScheduler('worker_manager');
@@ -118,6 +123,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const reason = err && err.message ? err.message : String(err || 'unknown error');
             log('错误', `账号 ${account.name} 启动失败: ${reason}`, { accountId: String(account.id), accountName: account.name });
             addAccountLog('start_failed', `账号 ${account.name} 启动失败`, account.id, account.name, { reason });
+            onRunIssue?.(account.id, 'worker_failed');
             return false;
         }
 
@@ -137,27 +143,16 @@ function createWorkerManager(options: WorkerManagerOptions) {
             wsError: null,
         };
 
-        const initialConfigSnapshot = buildConfigSnapshotForAccount(account.id);
-        child.send({
-            type: 'start',
-            config: {
-                code: account.code,
-                platform: account.platform,
-                systemTimeZone: initialConfigSnapshot.systemTimeZone,
-                systemServerUrl: initialConfigSnapshot.systemServerUrl,
-                systemClientVersion: initialConfigSnapshot.systemClientVersion,
-                systemWxClientVersion: initialConfigSnapshot.systemWxClientVersion,
-                systemDeviceInfo: initialConfigSnapshot.systemDeviceInfo,
-            },
-        });
-        child.send({ type: 'config_sync', config: initialConfigSnapshot });
-
         child.on('message', (msg: any) => {
             handleWorkerMessage(account.id, child, msg);
         });
 
         child.on('error', (err: any) => {
             log('系统', `账号 ${account.name} 子进程启动失败: ${err && err.message ? err.message : err}`, { accountId: String(account.id), accountName: account.name });
+            if (workers[account.id]?.process === child && !workers[account.id].stopping) {
+                stopWorker(account.id);
+                onRunIssue?.(account.id, 'worker_failed');
+            }
         });
 
         child.on('exit', (code: number, signal: string) => {
@@ -186,7 +181,32 @@ function createWorkerManager(options: WorkerManagerOptions) {
             if (current && current.process === child) {
                 delete workers[account.id];
             }
+            if (!current.stopping) onRunIssue?.(account.id, 'worker_failed');
+            else onStatusSync?.(account.id, null, displayName);
         });
+        try {
+            const initialConfigSnapshot = buildConfigSnapshotForAccount(account.id);
+            claimLoginCode?.(account);
+            child.send({
+                type: 'start',
+                config: {
+                    code: account.code,
+                    platform: account.platform,
+                    systemTimeZone: initialConfigSnapshot.systemTimeZone,
+                    systemServerUrl: initialConfigSnapshot.systemServerUrl,
+                    systemClientVersion: initialConfigSnapshot.systemClientVersion,
+                    systemWxClientVersion: initialConfigSnapshot.systemWxClientVersion,
+                    systemDeviceInfo: initialConfigSnapshot.systemDeviceInfo,
+                },
+            });
+            child.send({ type: 'config_sync', config: initialConfigSnapshot });
+        } catch (error: any) {
+            stopWorker(account.id);
+            log('错误', '发送账号启动配置失败', { accountId: account.id, reason: error?.message });
+            onRunIssue?.(account.id, 'worker_failed');
+            return false;
+        }
+        onStatusSync?.(account.id, null, account.name);
         return true;
     }
 
@@ -201,8 +221,14 @@ function createWorkerManager(options: WorkerManagerOptions) {
         managerScheduler.setTimeoutTask(`force_kill_${accountId}`, 1000, () => {
             const current = workers[accountId];
             if (current && current.process === proc) {
-                current.process.kill();
+                try { current.process.kill(); } catch { /* The worker may already have exited. */ }
                 delete workers[accountId];
+                for (const [reqId, req] of current.requests) {
+                    managerScheduler.clear(`api_timeout_${accountId}_${reqId}`);
+                    req.reject(new Error('Worker stopped'));
+                }
+                current.requests.clear();
+                onStatusSync?.(accountId, null, current.name);
             }
         });
         try { proc.send({ type: 'stop' }); } catch { /* The force-kill timer handles a closed IPC channel. */ }
@@ -262,7 +288,13 @@ function createWorkerManager(options: WorkerManagerOptions) {
         if (!worker || worker.process !== sourceProcess) return;
 
         if (msg.type === 'status_sync') {
+            if (worker.stopping) return;
             worker.status = normalizeStatusForPanel(msg.data, accountId, worker.name);
+            const connected = msg.data?.connection?.connected === true;
+            if (connected && !worker.hasConnected) {
+                worker.hasConnected = true;
+                onRunIssue?.(accountId, null);
+            }
             if (typeof onStatusSync === 'function') {
                 onStatusSync(accountId, worker.status, worker.name);
             }
@@ -299,7 +331,6 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 addOrUpdateAccount(accountUpdate);
             }
 
-            const connected = !!(msg.data && msg.data.connection && msg.data.connection.connected);
             if (connected) {
                 worker.disconnectedSince = 0;
                 worker.autoDeleteTriggered = false;
@@ -358,7 +389,12 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 errorCode: workerError.code,
                 errorName: workerError.name,
             });
+            if (msg.source === 'start' && !worker.stopping) {
+                stopWorker(accountId);
+                onRunIssue?.(accountId, 'worker_failed');
+            }
         } else if (msg.type === 'ws_error') {
+            if (worker.stopping) return;
             const code = Number(msg.code) || 0;
             const message = msg.message || '';
             worker.wsError = { code, message, at: Date.now() };
@@ -371,7 +407,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 );
             }
         } else if (msg.type === 'account_kicked') {
-            if (worker.terminalHandled) return;
+            if (worker.stopping || worker.terminalHandled) return;
             worker.terminalHandled = true;
             const reason = msg.reason || '未知';
             const reasonCode = Number(msg.reasonCode) || 0;
@@ -385,8 +421,9 @@ function createWorkerManager(options: WorkerManagerOptions) {
             });
             addAccountLog('kickout_stop', `账号 ${worker.name} 被踢下线，已自动停止`, accountId, worker.name, { reason, reasonCode, diagnostics });
             stopWorker(accountId);
+            onRunIssue?.(accountId, 'kicked');
         } else if (msg.type === 'account_disconnected') {
-            if (worker.terminalHandled) return;
+            if (worker.stopping || worker.terminalHandled) return;
             worker.terminalHandled = true;
             const source = String(msg.source || 'ws_close');
             const code = Number(msg.code) || 0;
@@ -423,6 +460,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 { source, disconnectCode: code, reason, phase, connectionId: Number(msg.connectionId) || 0, diagnostics: msg.diagnostics || null },
             );
             stopWorker(accountId);
+            onRunIssue?.(accountId, code === 400 ? 'login_required' : worker.hasConnected || phase === 'online' ? 'session_lost' : 'disconnected');
         } else if (msg.type === 'api_response') {
             const { id, result, error } = msg;
             managerScheduler.clear(`api_timeout_${accountId}_${id}`);

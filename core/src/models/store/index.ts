@@ -59,6 +59,10 @@ module.exports = {
 
     // Accounts
     getAccounts: accounts.getAccounts,
+    getAccountById: accounts.getAccountById,
+    findAccountByRef: accounts.findAccountByRef,
+    getAccountsByOwner: accounts.getAccountsByOwner,
+    setAccountRunState: accounts.setAccountRunState,
     addOrUpdateAccount: accounts.addOrUpdateAccount,
     deleteAccount: accounts.deleteAccount,
 

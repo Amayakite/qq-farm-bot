@@ -25,6 +25,7 @@ services:
       - DEFAULT_MAX_ACCOUNTS=${DEFAULT_MAX_ACCOUNTS:-3}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
+      - FARM_RESTORE_INTERVAL_MS=${FARM_RESTORE_INTERVAL_MS:-1500}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3007/api/game-version"]
       interval: 30s
