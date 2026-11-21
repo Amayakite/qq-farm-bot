@@ -12,6 +12,7 @@ const express = require('express');
 const { CONFIG } = require('../../config/config');
 const { getResourcePath } = require('../../config/runtime-paths');
 const { createModuleLogger } = require('../../services/logger');
+const { getOwner } = require('../../models/user-store');
 
 const { createAdminContext } = require('./context');
 const { mountAuthRoutes } = require('./auth-routes');
@@ -22,6 +23,8 @@ const { mountActivityCenterRoutes } = require('./activity-center-routes');
 const { mountCommerceRoutes } = require('./commerce-routes');
 const { mountWxLoginRoutes } = require('./wx-login-routes');
 const { mountQqLoginRoutes } = require('./qq-login-routes');
+const { mountTenantRoutes } = require('./tenant-routes');
+const { startTenantLifecycle } = require('../../services/tenant-lifecycle');
 const {
     setupSocketIO,
     emitRealtimeStatus: _emitStatus,
@@ -35,11 +38,17 @@ let ctx: AdminContext | null = null;
 
 function startAdminServer(dataProvider: any): void {
     if (ctx) return;
+    getOwner();
 
     ctx = createAdminContext(dataProvider);
 
     const app = express();
-    app.set('trust proxy', true);
+    const trustedProxies = String(process.env.TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean);
+    app.set('trust proxy', trustedProxies.length ? trustedProxies : false);
+    app.use('/api', (_req: any, res: any, next: any) => {
+        res.set('Cache-Control', 'no-store');
+        next();
+    });
     app.use(express.json());
 
     ctx.app = app;
@@ -81,6 +90,7 @@ function startAdminServer(dataProvider: any): void {
     mountAccountRoutes(app, ctx);
     mountActivityCenterRoutes(app, ctx);
     mountCommerceRoutes(app, ctx);
+    mountTenantRoutes(app, ctx);
 
     // SPA fallback
     app.get('*', (req: any, res: any) => {
@@ -101,6 +111,9 @@ function startAdminServer(dataProvider: any): void {
 
     // Setup Socket.IO
     setupSocketIO(ctx);
+
+    // 到期租户的会话与 worker 清理（每 10 秒一次）。
+    startTenantLifecycle(ctx);
 
 }
 

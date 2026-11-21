@@ -8,8 +8,9 @@ export {};
 
 const store = require('../../models/store');
 const { addOrUpdateAccount, deleteAccount } = store;
-const { findAccountByRef } = require('../../services/account-resolver');
+const userStore = require('../../models/user-store');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
+const { emitLogsAfterClear } = require('./socket');
 
 const {
     getAccId,
@@ -17,7 +18,16 @@ const {
     handleApiError,
     getAccountList,
     resolveAccId,
+    filterAccountsForAuth,
+    isOwner,
+    requireOwner,
 } = require('./middleware');
+
+function accountResponse(data: any, auth: any): any {
+    const accounts = filterAccountsForAuth(data?.accounts, auth)
+        .map(({ code: _code, ...account }: any) => account);
+    return isOwner(auth) ? { accounts, nextId: data.nextId } : { accounts };
+}
 
 function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
@@ -25,7 +35,10 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     app.get('/api/accounts', (req: Request, res: Response) => {
         try {
             const data = ctx.provider.getAccounts();
-            res.json({ ok: true, data });
+            res.json({
+                ok: true,
+                data: accountResponse(data, (req as any).auth),
+            });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -36,9 +49,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const rawRef = body.id || body.accountId || body.uin || req.headers['x-account-id'];
-            const accountList = getAccountList(ctx);
-            const target = findAccountByRef(accountList, rawRef);
-            if (!target || !target.id) {
+            const auth = (req as any).auth;
+            const accountId = resolveAccId(ctx, rawRef, auth);
+            if (!accountId) {
                 return res.status(404).json({ ok: false, error: 'Account not found' });
             }
 
@@ -47,7 +60,6 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                 return res.status(400).json({ ok: false, error: 'Missing remark' });
             }
 
-            const accountId = String(target.id);
             const data = addOrUpdateAccount({ id: accountId, name: remark });
             if (ctx.provider && typeof ctx.provider.setRuntimeAccountName === 'function') {
                 ctx.provider.setRuntimeAccountName(accountId, remark);
@@ -55,7 +67,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             if (ctx.provider && ctx.provider.addAccountLog) {
                 ctx.provider.addAccountLog('update', `更新账号备注: ${remark}`, accountId, remark);
             }
-            res.json({ ok: true, data });
+            res.json({ ok: true, data: accountResponse(data, auth) });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -69,16 +81,41 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             if (!requestedName) {
                 return res.status(400).json({ ok: false, error: '账号备注不能为空' });
             }
-            const visibleAccounts = getAccountList(ctx);
+            const auth = (req as any).auth;
+            const owner = isOwner(auth);
+            const visibleAccounts = getAccountList(ctx, auth);
+            const requestedOwnerId = owner ? String(body.ownerId || userStore.OWNER_ID) : auth.user.id;
             const remarkMatchedAccount = !body.id && requestedName
-                ? visibleAccounts.find((account: any) => String(account.name || '').trim() === requestedName)
+                ? visibleAccounts.find((account: any) => account.ownerId === requestedOwnerId && String(account.name || '').trim() === requestedName)
                 : null;
             const isRemarkRelogin = !!remarkMatchedAccount;
             const updateRef = body.id || (remarkMatchedAccount && remarkMatchedAccount.id) || '';
             const isUpdate = !!updateRef;
 
-            const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef) : '';
-            const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(updateRef) } : body;
+            const resolvedUpdateId = isUpdate ? resolveAccId(ctx, updateRef, auth) : '';
+            if (isUpdate && !resolvedUpdateId) {
+                return res.status(404).json({ ok: false, error: 'Account not found' });
+            }
+
+            const payload: any = isUpdate ? { ...body, id: resolvedUpdateId } : { ...body };
+            const existing = isUpdate ? visibleAccounts.find((account: any) => String(account.id) === resolvedUpdateId) : null;
+            delete payload.ownerId;
+            if (!isUpdate) {
+                const user = userStore.getUserById(requestedOwnerId);
+                if (!user || user.status !== 'active' || userStore.isExpired(user)) {
+                    return res.status(400).json({ ok: false, error: '目标用户不存在或不可用' });
+                }
+                const accountCount = visibleAccounts.filter((account: any) => account.ownerId === requestedOwnerId).length;
+                if (user.role === 'tenant' && accountCount >= user.maxAccounts) {
+                    return res.status(403).json({
+                        ok: false,
+                        error: `当前套餐最多只能添加 ${user.maxAccounts} 个账号`,
+                        errorType: 'quota_exceeded',
+                    });
+                }
+                payload.ownerId = requestedOwnerId;
+            }
+
             let wasRunning = false;
             if (isUpdate && ctx.provider.isAccountRunning) {
                 wasRunning = ctx.provider.isAccountRunning(payload.id);
@@ -86,16 +123,12 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
             // 检查是否仅修改了备注信息
             let onlyRemarkChanged = false;
-            if (isUpdate) {
-                const oldAccounts = ctx.provider.getAccounts();
-                const oldAccount = oldAccounts.accounts.find((a: any) => a.id === payload.id);
-                if (oldAccount) {
-                    // 检查 payload 中是否只包含 id 和 name 字段
-                    const payloadKeys = Object.keys(payload);
-                    const onlyIdAndName = payloadKeys.length === 2 && payloadKeys.includes('id') && payloadKeys.includes('name');
-                    if (onlyIdAndName) {
-                        onlyRemarkChanged = true;
-                    }
+            if (isUpdate && existing) {
+                // 检查 payload 中是否只包含 id 和 name 字段
+                const payloadKeys = Object.keys(payload);
+                const onlyIdAndName = payloadKeys.length === 2 && payloadKeys.includes('id') && payloadKeys.includes('name');
+                if (onlyIdAndName) {
+                    onlyRemarkChanged = true;
                 }
             }
 
@@ -123,7 +156,10 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                 // 如果是更新，且之前在运行，且不是仅修改备注，则重启
                 ctx.provider.restartAccount(payload.id);
             }
-            res.json({ ok: true, data });
+            res.json({
+                ok: true,
+                data: accountResponse(data, auth),
+            });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -131,16 +167,22 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
     app.delete('/api/accounts/:id', (req: Request, res: Response) => {
         try {
-            const resolvedId = resolveAccId(ctx, req.params.id) || String(req.params.id || '');
+            const auth = (req as any).auth;
+            const before = getAccountList(ctx, auth);
+            const resolvedId = resolveAccId(ctx, req.params.id, auth);
+            const target = before.find((account: any) => String(account.id) === resolvedId);
+            if (!resolvedId || !target) {
+                return res.status(404).json({ ok: false, error: 'Account not found' });
+            }
 
-            const before = ctx.provider.getAccounts();
-            const target = findAccountByRef(before.accounts || [], req.params.id);
             ctx.provider.stopAccount(resolvedId);
+            if (typeof ctx.provider.clearLogs === 'function') ctx.provider.clearLogs(resolvedId);
+            if (typeof ctx.provider.clearAccountLogs === 'function') ctx.provider.clearAccountLogs(resolvedId);
             const data = deleteAccount(resolvedId);
             if (ctx.provider.addAccountLog) {
                 ctx.provider.addAccountLog('delete', `删除账号: ${(target && target.name) || req.params.id}`, resolvedId, target ? target.name : '');
             }
-            res.json({ ok: true, data });
+            res.json({ ok: true, data: accountResponse(data, auth) });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -149,9 +191,15 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     // API: 账号日志
     app.get('/api/account-logs', (req: Request, res: Response) => {
         try {
-            const limit = Number.parseInt(req.query.limit as string) || 100;
-            let list: any[] = ctx.provider.getAccountLogs ? ctx.provider.getAccountLogs(limit) : [];
+            const limit = Math.max(1, Math.min(1000, Number.parseInt(req.query.limit as string) || 100));
+            let list: any[] = ctx.provider.getAccountLogs ? ctx.provider.getAccountLogs(Math.max(limit, 300)) : [];
             if (!Array.isArray(list)) list = [];
+            if (!isOwner((req as any).auth)) {
+                const allowed = new Set(getAccountIds(ctx, (req as any).auth));
+                list = list.filter((entry: any) => allowed.has(String(entry?.accountId || ''))).slice(0, limit);
+            } else {
+                list = list.slice(0, limit);
+            }
 
             // 与当前 web 前端保持一致：直接返回数组
             res.json(list);
@@ -163,21 +211,25 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     // API: 日志
     app.get('/api/logs', (req: Request, res: Response) => {
         const queryAccountIdRaw = (req.query.accountId || '').toString().trim();
-        const id = queryAccountIdRaw ? (queryAccountIdRaw === 'all' ? '' : resolveAccId(ctx, queryAccountIdRaw)) : getAccId(ctx, req);
-        // 如果没有指定账号ID，获取所有账号的日志
+        const rawRef = queryAccountIdRaw || req.headers['x-account-id'];
+        const id = rawRef === 'all' ? '' : resolveAccId(ctx, rawRef, (req as any).auth);
+        if (rawRef && rawRef !== 'all' && !id) {
+            return res.status(403).json({ ok: false, error: '无权访问该账号', errorType: 'forbidden_account' });
+        }
+        const options = {
+            limit: Math.max(1, Math.min(1000, Number.parseInt(req.query.limit as string) || 100)),
+            tag: req.query.tag || '',
+            module: req.query.module || '',
+            event: req.query.event || '',
+            keyword: req.query.keyword || '',
+            isWarn: req.query.isWarn,
+            timeFrom: req.query.timeFrom || '',
+            timeTo: req.query.timeTo || '',
+        };
+        // 如果没有指定账号ID，获取当前用户可见账号的日志
         if (!id) {
-            const accountIds = getAccountIds(ctx);
+            const accountIds = getAccountIds(ctx, (req as any).auth);
             const allLogs: any[] = [];
-            const options = {
-                limit: Number.parseInt(req.query.limit as string) || 100,
-                tag: req.query.tag || '',
-                module: req.query.module || '',
-                event: req.query.event || '',
-                keyword: req.query.keyword || '',
-                isWarn: req.query.isWarn,
-                timeFrom: req.query.timeFrom || '',
-                timeTo: req.query.timeTo || '',
-            };
 
             for (const accId of accountIds) {
                 const logs = ctx.provider.getLogs(accId, options);
@@ -187,23 +239,13 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
 
             // 按时间排序并限制数量
-            allLogs.sort((a: any, b: any) => (b.time || 0) - (a.time || 0));
+            allLogs.sort((a: any, b: any) => (b.ts || 0) - (a.ts || 0));
             const limitedLogs = allLogs.slice(0, options.limit);
 
             return res.json({ ok: true, data: limitedLogs });
         }
 
         // 指定了账号ID且通过权限检查，返回该账号的日志
-        const options = {
-            limit: Number.parseInt(req.query.limit as string) || 100,
-            tag: req.query.tag || '',
-            module: req.query.module || '',
-            event: req.query.event || '',
-            keyword: req.query.keyword || '',
-            isWarn: req.query.isWarn,
-            timeFrom: req.query.timeFrom || '',
-            timeTo: req.query.timeTo || '',
-        };
         const list = ctx.provider.getLogs(id, options);
         res.json({ ok: true, data: list });
     });
@@ -216,19 +258,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         try {
             const data = ctx.provider.clearLogs(id);
 
-            if (ctx.io && ctx.provider && typeof ctx.provider.getLogs === 'function') {
-                const accountLogs = ctx.provider.getLogs(id, { limit: 100 });
-                ctx.io.to(`account:${id}`).emit('logs:snapshot', {
-                    accountId: id,
-                    logs: Array.isArray(accountLogs) ? accountLogs : [],
-                });
-
-                const allLogs = ctx.provider.getLogs('', { limit: 100 });
-                ctx.io.to('account:all').emit('logs:snapshot', {
-                    accountId: 'all',
-                    logs: Array.isArray(allLogs) ? allLogs : [],
-                });
-            }
+            emitLogsAfterClear(ctx, id);
 
             res.json({ ok: true, data });
         } catch (e: any) {
@@ -263,7 +293,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     });
 
     // API: 设置面板主题
-    app.post('/api/settings/theme', async (req: Request, res: Response) => {
+    app.post('/api/settings/theme', requireOwner, async (req: Request, res: Response) => {
         try {
             const theme = String((req.body || {}).theme || '');
             const data = await ctx.provider.setUITheme(theme);
@@ -274,7 +304,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     });
 
     // API: 保存下线提醒配置
-    app.post('/api/settings/offline-reminder', async (req: Request, res: Response) => {
+    app.post('/api/settings/offline-reminder', requireOwner, async (req: Request, res: Response) => {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const channel = String(body.channel || '').trim().toLowerCase();
@@ -294,7 +324,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     });
 
     // API: 测试下线提醒推送（不落盘）
-    app.post('/api/settings/offline-reminder/test', async (req: Request, res: Response) => {
+    app.post('/api/settings/offline-reminder/test', requireOwner, async (req: Request, res: Response) => {
         try {
             const saved = store.getOfflineReminder ? store.getOfflineReminder() : {};
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
@@ -379,7 +409,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             const autoAcceptHarvestStealHarvest = id && (typeof store.getAutoAcceptHarvestStealHarvest === 'function') ? store.getAutoAcceptHarvestStealHarvest(id) : 8;
             const autoAcceptHarvestStealSteal = id && (typeof store.getAutoAcceptHarvestStealSteal === 'function') ? store.getAutoAcceptHarvestStealSteal(id) : 1;
             const ui = store.getUI();
-            const offlineReminder = store.getOfflineReminder
+            const offlineReminder = isOwner((req as any).auth) && store.getOfflineReminder
                 ? store.getOfflineReminder()
                 : { channel: 'webhook', endpoint: '', token: '', secret: '', title: '账号下线提醒', msg: '账号下线', offlineDeleteSec: 0 };
             res.json({ ok: true, data: { intervals, strategy, preferredSeed, friendQuietHours, automation, stealDelaySeconds, plantOrderRandom, plantDelaySeconds, fertilizerBuyOrganicCount, fertilizerBuyOrganicThresholdHours, fertilizerBuyNormalCount, fertilizerBuyNormalThresholdHours, fertilizerBuyCheckIntervalMinutes, bagSeedPriority, bagSeedMultiLandReservationEnabled, bagSeedLandTypes, bagSeedFallbackStrategy, autoAcceptFriendMinLevel, autoAcceptRequireOwnLevel, autoAcceptHarvestStealEnabled, autoAcceptHarvestStealHarvest, autoAcceptHarvestStealSteal, ui, offlineReminder } });
@@ -409,7 +439,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.get('/api/settings/system-config', (_req: Request, res: Response) => {
+    app.get('/api/settings/system-config', requireOwner, (_req: Request, res: Response) => {
         try {
             res.json({
                 ok: true,
@@ -428,18 +458,30 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.get('/api/settings/login-config', (_req: Request, res: Response) => {
+    app.get('/api/settings/login-config', (req: Request, res: Response) => {
         try {
             const loginSettings = store.getLoginSettings
                 ? store.getLoginSettings()
                 : { wechatQrLogin: true, qqQrLogin: false, napCatEndpoint: '', napCatSignature: '' };
+            if (!isOwner((req as any).auth)) {
+                // 租户只需要知道哪些登录方式可用，NapCat 地址和签名属于管理员配置。
+                return res.json({
+                    ok: true,
+                    data: {
+                        wechatQrLogin: loginSettings.wechatQrLogin,
+                        qqQrLogin: loginSettings.qqQrLogin,
+                        napCatEndpoint: '',
+                        napCatSignature: '',
+                    },
+                });
+            }
             res.json({ ok: true, data: loginSettings });
         } catch (e: any) {
             handleApiError(res, e);
         }
     });
 
-    app.post('/api/settings/login-config', (req: Request, res: Response) => {
+    app.post('/api/settings/login-config', requireOwner, (req: Request, res: Response) => {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const loginSettings = store.setLoginSettings
@@ -456,7 +498,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.post('/api/settings/system-config', (req: Request, res: Response) => {
+    app.post('/api/settings/system-config', requireOwner, (req: Request, res: Response) => {
         try {
             const { serverUrl, clientVersion, wxClientVersion, platform, os, timeZone, deviceInfo } = req.body || {};
             const saved = store.setSystemConfig({ serverUrl, clientVersion, wxClientVersion, platform, os, timeZone, deviceInfo });
@@ -471,7 +513,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.post('/api/settings/system-config/reset', (_req: Request, res: Response) => {
+    app.post('/api/settings/system-config/reset', requireOwner, (_req: Request, res: Response) => {
         try {
             const saved = getDefaultSystemConfig();
             store.setSystemConfig(saved);

@@ -8,24 +8,87 @@ const { Server } = require('socket.io');
 const SocketIOServer = Server;
 
 const {
+    resolveAuthContext,
     resolveAccId,
+    getAccountList,
+    isOwner,
 } = require('./middleware');
 
-function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: string = ''): void {
-    const incoming = String(accountRef || '').trim();
-    const resolved = incoming && incoming !== 'all' ? resolveAccId(ctx, incoming) : '';
+const OWNER_ALL_ROOM = 'owner:all-accounts';
 
+function leaveAccountRooms(socket: any): void {
     for (const room of socket.rooms) {
-        if (room.startsWith('account:')) socket.leave(room);
+        if (room === OWNER_ALL_ROOM || room.startsWith('account:')) socket.leave(room);
     }
+}
+
+function currentSocketAuth(ctx: AdminContext, socket: any): any {
+    const result = resolveAuthContext(ctx, socket.data.adminToken);
+    if (!result.auth || result.auth.user.mustChangePassword) {
+        socket.disconnect(true);
+        return null;
+    }
+    return result.auth;
+}
+
+function ownedAccountIds(ctx: AdminContext, auth: any): string[] {
+    return getAccountList(ctx, auth)
+        .map((account: any) => String(account.id || ''))
+        .filter(Boolean);
+}
+
+function collectLogsForAccounts(ctx: AdminContext, accountIds: string[], limit: number): any[] {
+    if (!ctx.provider || typeof ctx.provider.getLogs !== 'function') return [];
+    const logs: any[] = [];
+    for (const accountId of accountIds) {
+        const list = ctx.provider.getLogs(accountId, { limit });
+        if (Array.isArray(list)) logs.push(...list);
+    }
+    logs.sort((a: any, b: any) => (b.ts || 0) - (a.ts || 0));
+    return logs.slice(0, limit);
+}
+
+function filterAccountLogs(list: any[], accountIds: string[], limit: number): any[] {
+    const allowed = new Set(accountIds);
+    return (Array.isArray(list) ? list : [])
+        .filter((entry: any) => allowed.has(String(entry?.accountId || '')))
+        .slice(0, limit);
+}
+
+function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: string = ''): void {
+    const auth = currentSocketAuth(ctx, socket);
+    if (!auth) return;
+    const incoming = typeof accountRef === 'string' ? accountRef.trim() : '';
+    const specific = !!incoming && incoming !== 'all';
+    const resolved = specific ? resolveAccId(ctx, incoming, auth) : '';
+    if (specific && !resolved) {
+        socket.emit('subscribed', { ok: false, error: 'Account not found' });
+        return;
+    }
+    const owner = isOwner(auth);
+
+    leaveAccountRooms(socket);
+
+    let subscribedIds: string[] = [];
     if (resolved) {
         socket.join(`account:${resolved}`);
         socket.data.accountId = resolved;
+        subscribedIds = [resolved];
+    } else if (owner) {
+        socket.join(OWNER_ALL_ROOM);
+        socket.data.accountId = '';
+        subscribedIds = ownedAccountIds(ctx, auth);
     } else {
-        socket.join('account:all');
+        // 租户的 “all” 只订阅自己名下的账号房间，避免收到其他租户的实时事件。
+        subscribedIds = ownedAccountIds(ctx, auth);
+        for (const id of subscribedIds) socket.join(`account:${id}`);
         socket.data.accountId = '';
     }
-    socket.emit('subscribed', { accountId: socket.data.accountId || 'all' });
+    socket.data.accountIds = subscribedIds;
+    socket.emit('subscribed', {
+        accountId: socket.data.accountId || 'all',
+        accountIds: subscribedIds,
+    });
 
     try {
         const targetId = socket.data.accountId || '';
@@ -34,20 +97,22 @@ function applySocketSubscription(ctx: AdminContext, socket: any, accountRef: str
             socket.emit('status:update', { accountId: targetId, status: currentStatus });
         }
         if (ctx.provider && typeof ctx.provider.getLogs === 'function') {
-            let currentLogs: any[] = ctx.provider.getLogs(targetId, { limit: 100 });
-            if (!Array.isArray(currentLogs)) currentLogs = [];
-
+            const currentLogs = targetId
+                ? ctx.provider.getLogs(targetId, { limit: 100 })
+                : owner
+                    ? ctx.provider.getLogs('', { limit: 100 })
+                    : collectLogsForAccounts(ctx, subscribedIds, 100);
             socket.emit('logs:snapshot', {
                 accountId: targetId || 'all',
-                logs: currentLogs,
+                logs: Array.isArray(currentLogs) ? currentLogs : [],
             });
         }
         if (ctx.provider && typeof ctx.provider.getAccountLogs === 'function') {
-            let currentAccountLogs: any[] = ctx.provider.getAccountLogs(100);
-            if (!Array.isArray(currentAccountLogs)) currentAccountLogs = [];
-
+            const currentAccountLogs = ctx.provider.getAccountLogs(300);
             socket.emit('account-logs:snapshot', {
-                logs: currentAccountLogs,
+                logs: owner
+                    ? (Array.isArray(currentAccountLogs) ? currentAccountLogs.slice(0, 100) : [])
+                    : filterAccountLogs(currentAccountLogs, subscribedIds, 100),
             });
         }
     } catch {
@@ -73,10 +138,12 @@ function setupSocketIO(ctx: AdminContext): void {
             ? String(socket.handshake.headers['x-admin-token'])
             : '';
         const token = authToken || headerToken;
-        if (!token || !ctx.tokens.has(token)) {
+        const result = resolveAuthContext(ctx, token);
+        if (!result.auth || result.auth.user.mustChangePassword) {
             return next(new Error('Unauthorized'));
         }
         socket.data.adminToken = token;
+        socket.data.userId = result.auth.user.id;
         return next();
     });
 
@@ -94,37 +161,44 @@ function setupSocketIO(ctx: AdminContext): void {
     });
 }
 
-function emitRealtimeStatus(ctx: AdminContext, accountId: string, status: any): void {
-    if (!ctx.io) return;
-    const id = String(accountId || '').trim();
-    if (!id) return;
+function forAccountSubscribers(ctx: AdminContext, id: string, deliver: (socket: any, auth: any) => void): void {
+    if (!ctx.io || !id) return;
+    const { sockets, adapter } = ctx.io.sockets;
+    const subscribers = new Set([...(adapter.rooms.get(`account:${id}`) || []), ...(adapter.rooms.get(OWNER_ALL_ROOM) || [])]);
+    for (const socketId of subscribers) {
+        const socket = sockets.get(socketId);
+        if (!socket) continue;
+        const auth = currentSocketAuth(ctx, socket);
+        if (!auth) continue;
+        if (!isOwner(auth) && resolveAccId(ctx, id, auth) !== id) {
+            socket.leave(`account:${id}`);
+            continue;
+        }
+        deliver(socket, auth);
+    }
+}
 
-    // 推送到特定账号房间（只有订阅了该账号的用户能收到）
-    ctx.io.to(`account:${id}`).emit('status:update', { accountId: id, status });
+function emitRealtimeStatus(ctx: AdminContext, accountId: string, status: any): void {
+    const id = String(accountId || '').trim();
+    forAccountSubscribers(ctx, id, socket => socket.emit('status:update', { accountId: id, status }));
 }
 
 function emitRealtimeLog(ctx: AdminContext, entry: any): void {
-    if (!ctx.io) return;
     const payload = (entry && typeof entry === 'object') ? entry : {};
     const id = String(payload.accountId || '').trim();
 
-    // 如果没有指定账号ID，不推送给任何人（防止数据泄露）
-    if (!id) return;
-
-    // 推送到特定账号房间（只有订阅了该账号的用户能收到）
-    ctx.io.to(`account:${id}`).emit('log:new', payload);
+    forAccountSubscribers(ctx, id, socket => socket.emit('log:new', payload));
 }
 
 function emitRealtimeAccountLog(ctx: AdminContext, entry: any): void {
-    if (!ctx.io) return;
     const payload = (entry && typeof entry === 'object') ? entry : {};
     const id = String(payload.accountId || '').trim();
 
-    // 如果没有指定账号ID，不推送给任何人（防止数据泄露）
-    if (!id) return;
+    forAccountSubscribers(ctx, id, socket => socket.emit('account-log:new', payload));
+}
 
-    // 推送到特定账号房间（只有订阅了该账号的用户能收到）
-    ctx.io.to(`account:${id}`).emit('account-log:new', payload);
+function emitLogsAfterClear(ctx: AdminContext, id: string): void {
+    forAccountSubscribers(ctx, id, socket => applySocketSubscription(ctx, socket, socket.data.accountId));
 }
 
 module.exports = {
@@ -132,4 +206,5 @@ module.exports = {
     emitRealtimeStatus,
     emitRealtimeLog,
     emitRealtimeAccountLog,
+    emitLogsAfterClear,
 };

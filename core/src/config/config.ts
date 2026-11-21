@@ -37,7 +37,14 @@ interface RuntimeConfig extends SystemConfig {
     friendCheckIntervalMin: number;
     friendCheckIntervalMax: number;
     adminPort: number;
-    adminPassword: string | undefined;
+    /** 为 true 时不展示面板内的上游 GitHub 链接。 */
+    hideUpstreamLinks: boolean;
+    /** 面板品牌名，默认沿用项目名。 */
+    siteName: string;
+    /** 租户会话有效期（小时）。 */
+    sessionTtlHours: number;
+    /** 新租户默认可添加的账号数量。 */
+    defaultMaxAccounts: number;
 }
 
 // ============ 设备预设 ============
@@ -221,7 +228,10 @@ const CONFIG: RuntimeConfig = {
     friendCheckIntervalMin: 12000,
     friendCheckIntervalMax: 15000,
     adminPort: Number(process.env.ADMIN_PORT),
-    adminPassword: process.env.ADMIN_PASSWORD,
+    hideUpstreamLinks: /^(?:1|true|yes|on)$/i.test(String(process.env.HIDE_UPSTREAM_LINKS || '').trim()),
+    siteName: String(process.env.SITE_NAME || '').trim() || 'QQ农场智能助手',
+    sessionTtlHours: Math.max(1, Math.min(24 * 365, Number(process.env.SESSION_TTL_HOURS) || 24 * 7)),
+    defaultMaxAccounts: Math.max(1, Math.min(100, Number(process.env.DEFAULT_MAX_ACCOUNTS) || 3)),
 };
 
 function normalizeDeviceInfo(input: any): DeviceInfo {

@@ -1,6 +1,7 @@
 export {};
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 function ensureParentDir(filePath: string): void {
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
@@ -55,17 +56,17 @@ function readJsonFileStrict(filePath: string, fallbackFactory?: () => any): any 
     }
 }
 
-function writeJsonFileAtomic(filePath: string, data: any, space = 2): void {
+function writeJsonFileAtomic(filePath: string, data: any, space = 2, mode?: number): void {
     const json = JSON.stringify(data, null, space);
-    writeTextFileAtomic(filePath, json);
+    writeTextFileAtomic(filePath, json, mode);
 }
 
-function writeTextFileAtomic(filePath: string, text = ''): void {
+function writeTextFileAtomic(filePath: string, text = '', mode?: number): void {
     ensureParentDir(filePath);
-    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 
     try {
-        fs.writeFileSync(tmpPath, String(text), 'utf8');
+        fs.writeFileSync(tmpPath, String(text), { encoding: 'utf8', mode, flag: 'wx' });
         fs.renameSync(tmpPath, filePath);
     } finally {
         try {

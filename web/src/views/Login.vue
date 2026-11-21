@@ -1,24 +1,34 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink, useRoute } from 'vue-router'
 import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BrandMark from '@/components/ui/BrandMark.vue'
+import { usePublicConfigStore } from '@/stores/public-config'
 import { useUserStore } from '@/stores/user'
 
 declare const __APP_VERSION__: string
 
 const userStore = useUserStore()
+const publicConfig = usePublicConfigStore()
+const route = useRoute()
 const appVersion = __APP_VERSION__
 const gameVersion = ref('')
 const wxGameVersion = ref('')
 const username = ref('')
 const password = ref('')
+const newPassword = ref('')
+const confirmPassword = ref('')
+const mustChangePassword = computed(() => userStore.userInfo?.mustChangePassword === true)
 const error = ref('')
 const success = ref('')
 const loading = ref(false)
 const lockoutRemaining = ref(0)
 const rateLimitRemaining = ref(0)
+const needsRenewal = ref(false)
+const expiredNotice = computed(() => route.query.expired === '1')
+const disabledNotice = computed(() => route.query.disabled === '1')
 
 const usernameValid = computed(() => {
   const name = username.value
@@ -50,18 +60,50 @@ function validateForm(): boolean {
 }
 
 async function handleSubmit() {
+  if (mustChangePassword.value) {
+    error.value = ''
+    if (newPassword.value !== confirmPassword.value) {
+      error.value = '两次密码输入不一致'
+      return
+    }
+    loading.value = true
+    try {
+      const result = await userStore.changePassword(password.value, newPassword.value)
+      if (result.ok) {
+        username.value = ''
+        password.value = ''
+        newPassword.value = ''
+        confirmPassword.value = ''
+        success.value = '密码修改成功，请重新登录'
+      }
+      else {
+        error.value = getApiErrorMessage(result, '修改密码失败')
+      }
+    }
+    catch (e) {
+      error.value = getApiErrorMessage(e, '修改密码失败')
+    }
+    finally {
+      loading.value = false
+    }
+    return
+  }
+
   if (!validateForm())
     return
 
   loading.value = true
   error.value = ''
   success.value = ''
+  needsRenewal.value = false
 
   try {
     const result = await userStore.login(username.value, password.value)
     if (result.ok) {
-      if (result.data?.mustChangePassword)
-        success.value = '登录成功，请修改默认密码'
+      if (result.data?.mustChangePassword) {
+        success.value = '请修改初始密码'
+        return
+      }
       setTimeout(() => {
         window.location.href = '/'
       }, 500)
@@ -75,6 +117,10 @@ async function handleSubmit() {
       error.value = result.error || '账户已被锁定'
       if (result.remainingMs)
         lockoutRemaining.value = Math.ceil(result.remainingMs / 1000 / 60)
+    }
+    else if (result.errorType === 'expired') {
+      error.value = result.error || '账号已到期，请使用续费码'
+      needsRenewal.value = true
     }
     else {
       error.value = result.error || '登录失败'
@@ -113,7 +159,10 @@ async function fetchGameVersion() {
   }
 }
 
-onMounted(fetchGameVersion)
+onMounted(() => {
+  fetchGameVersion()
+  publicConfig.fetchConfig()
+})
 </script>
 
 <template>
@@ -124,16 +173,25 @@ onMounted(fetchGameVersion)
         <div>
           <span class="logo-kicker">QQ FARM</span>
           <h1 class="logo-title">
-            QQ农场智能助手
+            {{ publicConfig.siteName }}
           </h1>
           <p class="logo-subtitle">
-            超级管理员登录
+            登录到你的控制面板
           </p>
         </div>
       </header>
 
+      <div v-if="expiredNotice" class="message notice-message" role="status">
+        <span class="i-carbon-time" />
+        <div>账号已到期，请先使用续费码延长有效期。</div>
+      </div>
+      <div v-if="disabledNotice" class="message error-message" role="alert">
+        <span class="i-carbon-locked" />
+        <div>账号已被停用，请联系管理员。</div>
+      </div>
+
       <form class="form-area" @submit.prevent="handleSubmit">
-        <div class="form-group">
+        <div v-if="!mustChangePassword" class="form-group">
           <label class="form-label" for="username">
             <span class="i-carbon-user" />
             用户名
@@ -154,7 +212,7 @@ onMounted(fetchGameVersion)
         <div class="form-group">
           <label class="form-label" for="password">
             <span class="i-carbon-locked" />
-            密码
+            {{ mustChangePassword ? '初始密码' : '密码' }}
           </label>
           <BaseInput
             id="password"
@@ -166,12 +224,26 @@ onMounted(fetchGameVersion)
           />
         </div>
 
+        <template v-if="mustChangePassword">
+          <div class="form-group">
+            <label for="new-password" class="form-label">新密码</label>
+            <BaseInput id="new-password" v-model="newPassword" type="password" autocomplete="new-password" required />
+          </div>
+          <div class="form-group">
+            <label for="confirm-password" class="form-label">确认新密码</label>
+            <BaseInput id="confirm-password" v-model="confirmPassword" type="password" autocomplete="new-password" required />
+          </div>
+        </template>
+
         <div v-if="error" class="message error-message" role="alert">
           <span class="i-carbon-warning-alt" />
           <div>
             {{ error }}
             <span v-if="lockoutRemaining > 0">（{{ lockoutRemaining }} 分钟后解锁）</span>
             <span v-if="rateLimitRemaining > 0">（{{ rateLimitRemaining }} 秒后可重试）</span>
+            <RouterLink v-if="needsRenewal" class="renew-inline-link" to="/renew">
+              去续费
+            </RouterLink>
           </div>
         </div>
         <div v-if="success" class="message success-message" role="status">
@@ -182,7 +254,7 @@ onMounted(fetchGameVersion)
         <BaseButton type="submit" variant="primary" block :loading="loading" class="submit-btn">
           <span v-if="!loading" class="inline-flex items-center gap-2">
             <span class="i-carbon-login" />
-            登录
+            {{ mustChangePassword ? '修改密码' : '登录' }}
           </span>
         </BaseButton>
       </form>
@@ -192,8 +264,14 @@ onMounted(fetchGameVersion)
           <span>Web v{{ appVersion }}</span>
           <span v-if="gameVersion">QQ {{ gameVersion }}</span>
           <span v-if="wxGameVersion">微信 {{ wxGameVersion }}</span>
+          <RouterLink class="footer-auth-link" to="/redeem">
+            激活码注册
+          </RouterLink>
+          <RouterLink class="footer-auth-link" to="/renew">
+            续费
+          </RouterLink>
         </div>
-        <a href="https://github.com/liyangpengs/qq-farm-bot" target="_blank" rel="noopener noreferrer" class="github-link" aria-label="GitHub">
+        <a v-if="!publicConfig.hideUpstreamLinks" href="https://github.com/liyangpengs/qq-farm-bot" target="_blank" rel="noopener noreferrer" class="github-link" aria-label="GitHub">
           <span class="i-carbon-logo-github" />
         </a>
       </footer>
@@ -341,6 +419,29 @@ onMounted(fetchGameVersion)
   border-color: rgba(67, 141, 99, 0.18);
   color: var(--ui-primary);
   background: var(--ui-primary-soft);
+}
+
+.notice-message {
+  border-color: rgba(67, 141, 99, 0.18);
+  color: var(--ui-primary);
+  background: var(--ui-primary-soft);
+}
+
+.footer-auth-link {
+  color: var(--ui-muted);
+  text-decoration: none;
+  transition: color 0.16s ease;
+}
+
+.footer-auth-link:hover {
+  color: var(--ui-primary);
+}
+
+.renew-inline-link {
+  margin-left: 8px;
+  color: var(--ui-danger);
+  font-weight: var(--fw-600);
+  text-decoration: underline;
 }
 
 .submit-btn {

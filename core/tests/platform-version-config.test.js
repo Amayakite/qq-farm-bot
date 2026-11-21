@@ -117,7 +117,7 @@ test('parallel QQ and WeChat workers select their own protocol, App ID and WASM'
         `, { eval: true, workerData: { root: path.resolve(__dirname, '../dist'), platform } });
         worker.once('message', resolve);
         worker.once('error', reject);
-        worker.once('exit', code => { if (code) reject(new Error('Worker failed: ' + code)); });
+        worker.once('exit', code => { if (code) reject(new Error(`Worker failed: ${  code}`)); });
     })));
     for (const item of result) {
         assert.equal(item.version, `1.15.0.2_${item.platform}`);
@@ -141,18 +141,24 @@ test('saving or resetting connection settings never restarts live QQ or WeChat a
         const h = memoryStore(null);
         const { mountAccountRoutes } = load('controllers/admin/account-routes.js', { '../../models/store': h.store });
         let broadcasts = 0;
-        mountAccountRoutes({ get() {}, post: (route, handler) => routes.set(route, handler), delete() {}, put() {} }, { provider: {
+        const ownerAuth = { user: { id: 'owner', role: 'owner' } };
+        mountAccountRoutes({
+            get: (route, ...handlers) => routes.set(route, handlers.at(-1)),
+            post: (route, ...handlers) => routes.set(route, handlers.at(-1)),
+            delete() {},
+            put() {},
+        }, { provider: {
             getAccounts: () => ({ accounts: [{ id: 'qq' }, { id: 'wx' }] }),
             isAccountRunning: () => true,
             restartAccount: () => assert.fail('Must not replay a used Code or disconnect another platform'),
             broadcastConfig: () => broadcasts++,
         } });
         let response;
-        const res = { json: value => { response = value; } };
-        routes.get('/api/settings/system-config')({ body: { ...saved, wxClientVersion: 'wx-changed' } }, res);
+        const res = { status: () => res, json: value => { response = value; } };
+        routes.get('/api/settings/system-config')({ auth: ownerAuth, body: { ...saved, wxClientVersion: 'wx-changed' } }, res);
         assert.equal(response.ok, true);
         assert.equal(response.data.saved.wxClientVersion, 'wx-changed');
-        routes.get('/api/settings/system-config/reset')({}, res);
+        routes.get('/api/settings/system-config/reset')({ auth: ownerAuth }, res);
         assert.equal(response.ok, true);
         assert.equal(response.data.current.wxClientVersion, config.DEFAULT_WX_CLIENT_VERSION);
         assert.equal(broadcasts, 2);

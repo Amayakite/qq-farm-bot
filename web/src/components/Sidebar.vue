@@ -13,6 +13,7 @@ import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { getSpaceMenu } from '@/router/menu'
 import { getPlatformClass, getPlatformLabel, useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
+import { usePublicConfigStore } from '@/stores/public-config'
 import { useStatusStore } from '@/stores/status'
 import { useUserStore } from '@/stores/user'
 
@@ -20,6 +21,7 @@ const accountStore = useAccountStore()
 const statusStore = useStatusStore()
 const appStore = useAppStore()
 const userStore = useUserStore()
+const publicConfig = usePublicConfigStore()
 const route = useRoute()
 const router = useRouter()
 const isDesktop = useMediaQuery('(min-width: 1024px)')
@@ -111,8 +113,9 @@ function openRemarkModal(acc: any) {
 onMounted(() => {
   accountStore.fetchAccounts()
   checkConnection()
-  // 获取当前用户信息
+  // 获取当前用户信息和面板白标配置
   userStore.fetchUserInfo()
+  publicConfig.fetchConfig()
 })
 
 onBeforeUnmount(() => {
@@ -284,6 +287,7 @@ const connectionStatus = computed(() => {
 
 const navItems = computed(() => {
   return getSpaceMenu(route.meta.gameSpace === 'ranch')
+    .filter(item => !item.meta?.ownerOnly || userStore.isOwner)
     .map(item => ({
       path: item.path ? `/${item.path}` : '/',
       label: item.label,
@@ -312,6 +316,16 @@ watch(isSidebarCollapsed, closeFlyouts)
 async function handleLogout() {
   await userStore.logout()
   router.push('/login')
+}
+
+function goToAdmin() {
+  showUserDropdown.value = false
+  router.push('/admin/tenants')
+}
+
+function goToRenew() {
+  showUserDropdown.value = false
+  router.push('/renew')
 }
 
 async function copyToken() {
@@ -379,7 +393,7 @@ async function copyToken() {
               style="--focus-ring: var(--theme-primary)"
               aria-haspopup="menu"
               :aria-expanded="showUserDropdown"
-              :aria-label="isSidebarCollapsed ? `管理员：${userStore.username || '未登录'}` : undefined"
+              :aria-label="isSidebarCollapsed ? `${userStore.roleLabel}：${userStore.username || '未登录'}` : undefined"
               @click="toggleUserDropdown"
             >
               <div class="flex items-center gap-3 overflow-hidden">
@@ -407,7 +421,13 @@ async function copyToken() {
                     <span
                       class="admin-badge rounded-lg px-1.5 py-0.2 text-[10px] leading-tight font-medium"
                     >
-                      超级管理员
+                      {{ userStore.roleLabel }}
+                    </span>
+                    <span
+                      v-if="userStore.isTenant && userStore.expiresInDays !== null"
+                      class="rounded-lg bg-emerald-50 px-1.5 py-0.2 text-[10px] text-emerald-600 leading-tight font-medium dark:bg-emerald-900/25 dark:text-emerald-400"
+                    >
+                      剩余 {{ userStore.expiresInDays }} 天
                     </span>
                   </div>
                 </div>
@@ -421,7 +441,7 @@ async function copyToken() {
           </template>
           <div class="sidebar-tooltip-content">
             <strong>{{ userStore.username || '未登录' }}</strong>
-            <span>超级管理员 · 点击查看账户菜单</span>
+            <span>{{ userStore.roleLabel }} · 点击查看账户菜单</span>
           </div>
         </NTooltip>
 
@@ -435,10 +455,31 @@ async function copyToken() {
               {{ userStore.username }}
             </div>
             <div class="text-xs text-gray-500 dark:text-gray-400">
-              超级管理员
+              {{ userStore.roleLabel }}
+              <template v-if="userStore.isTenant && userStore.expiresInDays !== null">
+                · 剩余 {{ userStore.expiresInDays }} 天
+              </template>
             </div>
           </div>
           <div class="py-1">
+            <NButton
+              v-if="userStore.isOwner"
+              class="sidebar-menu-button"
+              quaternary block
+              @click="goToAdmin"
+            >
+              <div class="i-carbon-user-admin" />
+              <span>用户与激活码</span>
+            </NButton>
+            <NButton
+              v-if="userStore.isTenant"
+              class="sidebar-menu-button"
+              quaternary block
+              @click="goToRenew"
+            >
+              <div class="i-carbon-renew" />
+              <span>续费</span>
+            </NButton>
             <NButton
               class="sidebar-menu-button"
 
@@ -710,6 +751,7 @@ async function copyToken() {
             <div class="flex items-center gap-2">
               <span>Web v{{ version }}</span>
               <a
+                v-if="!publicConfig.hideUpstreamLinks"
                 href="https://github.com/liyangpengs/qq-farm-bot"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -753,6 +795,7 @@ async function copyToken() {
         <NTooltip placement="right" :show-arrow="false" :theme-overrides="sidebarTooltipTheme">
           <template #trigger>
             <a
+              v-if="!publicConfig.hideUpstreamLinks"
               class="sidebar-footer__icon"
               href="https://github.com/liyangpengs/qq-farm-bot"
               target="_blank"
@@ -761,12 +804,15 @@ async function copyToken() {
             >
               <span class="i-carbon-information text-lg" />
             </a>
+            <span v-else class="sidebar-footer__icon" tabindex="0" aria-label="版本信息">
+              <span class="i-carbon-information text-lg" />
+            </span>
           </template>
           <div class="sidebar-tooltip-content">
             <strong>版本信息</strong>
             <span>Web v{{ version }}</span>
             <span v-if="serverVersion">Core v{{ serverVersion }}</span>
-            <span>点击访问开源地址</span>
+            <span v-if="!publicConfig.hideUpstreamLinks">点击访问开源地址</span>
           </div>
         </NTooltip>
       </div>

@@ -3,13 +3,16 @@ import type { Server } from 'node:http';
 import type { Server as SocketIOServer } from 'socket.io';
 export {};
 
+const { createSessionStore } = require('../../models/session-store');
+
 /**
  * AdminContext factory
  * Creates and holds all shared state for the admin server.
  */
 
 export interface AdminContext {
-    tokens: Set<string>;
+    /** token -> { userId, role, expiresAt } */
+    tokens: ReturnType<typeof createSessionStore>;
     app: Application | null;
     server: Server | null;
     io: SocketIOServer | null;
@@ -17,7 +20,7 @@ export interface AdminContext {
 }
 
 function createAdminContext(dataProvider: any): AdminContext {
-    const tokens = new Set<string>();
+    const tokens = createSessionStore();
     return {
         tokens,
         app: null,

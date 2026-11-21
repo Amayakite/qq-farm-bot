@@ -2,6 +2,7 @@ export {};
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { getDataFile, ensureDataDir } = require('../config/runtime-paths');
+const { writeJsonFileAtomic } = require('../services/json-db');
 
 const LOGIN_ATTEMPTS_FILE: string = getDataFile('login-attempts.json');
 const ADMIN_ATTEMPT_KEY = 'admin';
@@ -28,9 +29,11 @@ interface PasswordStrengthResult {
     errors: string[];
 }
 
-let loginAttempts: Record<string, LoginAttempt> = {};
+let loginAttempts: Record<string, LoginAttempt> | undefined;
 
 function loadLoginAttempts(): void {
+    if (loginAttempts) return;
+    loginAttempts = {};
     ensureDataDir();
     try {
         if (!fs.existsSync(LOGIN_ATTEMPTS_FILE)) {
@@ -41,7 +44,7 @@ function loadLoginAttempts(): void {
         const source = raw && typeof raw === 'object' ? raw : {};
         loginAttempts = {};
         for (const [key, value] of Object.entries(source)) {
-            if ((key === ADMIN_ATTEMPT_KEY || key.startsWith('ip:')) && value && typeof value === 'object') {
+            if ((key === ADMIN_ATTEMPT_KEY || key.startsWith('ip:') || key.startsWith('user:')) && value && typeof value === 'object') {
                 loginAttempts[key] = value as LoginAttempt;
             }
         }
@@ -57,20 +60,23 @@ function loadLoginAttempts(): void {
 function saveLoginAttempts(): void {
     ensureDataDir();
     try {
-        fs.writeFileSync(LOGIN_ATTEMPTS_FILE, JSON.stringify(loginAttempts, null, 2), 'utf8');
+        writeJsonFileAtomic(LOGIN_ATTEMPTS_FILE, loginAttempts, 2, 0o600);
     } catch (e: any) {
         console.error('保存登录尝试记录失败:', e.message);
     }
 }
 
 function cleanExpiredAttempts(): void {
+    loadLoginAttempts();
+    const attempts = loginAttempts!;
     const now = Date.now();
     let changed = false;
-    for (const key of Object.keys(loginAttempts)) {
-        const attempt = loginAttempts[key];
+    for (const key of Object.keys(attempts)) {
+        const attempt = attempts[key];
         if ((attempt.lockedUntil && attempt.lockedUntil < now)
-            || (attempt.windowStart && now - attempt.windowStart > RATE_LIMIT_WINDOW)) {
-            delete loginAttempts[key];
+            || (attempt.windowStart && now - attempt.windowStart > RATE_LIMIT_WINDOW)
+            || (!attempt.lockedUntil && attempt.lastAttempt && now - attempt.lastAttempt > LOCKOUT_DURATION)) {
+            delete attempts[key];
             changed = true;
         }
     }
@@ -81,9 +87,9 @@ function checkRateLimit(ip: string): { allowed: boolean; remainingMs?: number; m
     cleanExpiredAttempts();
     const key = `ip:${ip}`;
     const now = Date.now();
-    const attempt = loginAttempts[key];
+    const attempt = loginAttempts![key];
     if (!attempt || now - (attempt.windowStart || 0) > RATE_LIMIT_WINDOW) {
-        loginAttempts[key] = { count: 1, windowStart: now };
+        loginAttempts![key] = { count: 1, windowStart: now };
         saveLoginAttempts();
         return { allowed: true };
     }
@@ -96,9 +102,9 @@ function checkRateLimit(ip: string): { allowed: boolean; remainingMs?: number; m
     return { allowed: true };
 }
 
-function checkAdminLockout(): { locked: boolean; remainingMs?: number; message?: string } {
+function checkLockout(key: string): { locked: boolean; remainingMs?: number; message?: string } {
     cleanExpiredAttempts();
-    const attempt = loginAttempts[ADMIN_ATTEMPT_KEY];
+    const attempt = loginAttempts![key];
     const now = Date.now();
     if (attempt?.lockedUntil && attempt.lockedUntil > now) {
         const remainingMs = attempt.lockedUntil - now;
@@ -107,12 +113,13 @@ function checkAdminLockout(): { locked: boolean; remainingMs?: number; message?:
     return { locked: false };
 }
 
-function recordFailedAttempt(): { locked: boolean; message?: string; remainingAttempts?: number } {
+function recordFailedAttemptFor(key: string): { locked: boolean; message?: string; remainingAttempts?: number } {
+    cleanExpiredAttempts();
     const now = Date.now();
-    const attempt = loginAttempts[ADMIN_ATTEMPT_KEY] || { count: 0, firstAttempt: now };
+    const attempt = loginAttempts![key] || { count: 0, firstAttempt: now };
     attempt.count++;
     attempt.lastAttempt = now;
-    loginAttempts[ADMIN_ATTEMPT_KEY] = attempt;
+    loginAttempts![key] = attempt;
     if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
         attempt.lockedUntil = now + LOCKOUT_DURATION;
         saveLoginAttempts();
@@ -122,11 +129,24 @@ function recordFailedAttempt(): { locked: boolean; message?: string; remainingAt
     return { locked: false, remainingAttempts: MAX_LOGIN_ATTEMPTS - attempt.count };
 }
 
-function clearFailedAttempts(): void {
-    if (loginAttempts[ADMIN_ATTEMPT_KEY]) {
-        delete loginAttempts[ADMIN_ATTEMPT_KEY];
+function clearFailedAttemptsFor(key: string): void {
+    loadLoginAttempts();
+    if (loginAttempts![key]) {
+        delete loginAttempts![key];
         saveLoginAttempts();
     }
+}
+
+function checkAdminLockout(): { locked: boolean; remainingMs?: number; message?: string } {
+    return checkLockout(ADMIN_ATTEMPT_KEY);
+}
+
+function recordFailedAttempt(): { locked: boolean; message?: string; remainingAttempts?: number } {
+    return recordFailedAttemptFor(ADMIN_ATTEMPT_KEY);
+}
+
+function clearFailedAttempts(): void {
+    clearFailedAttemptsFor(ADMIN_ATTEMPT_KEY);
 }
 
 function validatePasswordStrength(password: string): PasswordStrengthResult {
@@ -152,12 +172,17 @@ function hashPassword(password: string, salt: string | null = null): string {
 }
 
 function verifyPassword(password: string, storedPassword: string): boolean {
+    let expected;
+    let actual;
     if (storedPassword.includes(':')) {
         const [salt, hash] = storedPassword.split(':');
-        const nextHash = crypto.pbkdf2Sync(password, salt, ITERATIONS, KEY_LENGTH, DIGEST).toString('hex');
-        return hash === nextHash;
+        expected = Buffer.from(hash, 'hex');
+        actual = crypto.pbkdf2Sync(password, salt, ITERATIONS, KEY_LENGTH, DIGEST);
+    } else {
+        expected = Buffer.from(storedPassword, 'hex');
+        actual = crypto.createHash('sha256').update(password).digest();
     }
-    return storedPassword === crypto.createHash('sha256').update(password).digest('hex');
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 function needsRehash(storedPassword: string): boolean {
@@ -167,6 +192,9 @@ function needsRehash(storedPassword: string): boolean {
 module.exports = {
     loadLoginAttempts,
     checkRateLimit,
+    checkLockout,
+    recordFailedAttemptFor,
+    clearFailedAttemptsFor,
     checkAdminLockout,
     recordFailedAttempt,
     clearFailedAttempts,
