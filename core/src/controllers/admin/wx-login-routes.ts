@@ -17,6 +17,10 @@ const tasks = new Map<string, Task>();
 const creating = new Set<string>();
 const wxLogin = new WxLoginService();
 
+function hasLegacyWxTask(ownerId: string): boolean {
+    return creating.has(ownerId) || [...tasks.values()].some(task => task.ownerId === ownerId && Date.now() - task.createdAt < TASK_TTL_MS);
+}
+
 function destroy(task: Task): void {
     if (!tasks.delete(task.id)) return;
     clearTimeout(task.timer);
@@ -55,7 +59,7 @@ function mountWxLoginRoutes(app: Application, ctx: AdminContext): void {
         const { auth, adminToken } = req as any;
         const ownerId = String(auth.user.id);
         const active = [...tasks.values()].filter(task => task.ownerId === ownerId);
-        if (creating.has(ownerId) || active.length >= 3) {
+        if (creating.has(ownerId) || active.length >= 3 || ctx.scanTasks?.hasPending('wx', ownerId)) {
             return res.status(429).json({ ok: false, error: '扫码登录任务过多，请稍后重试' });
         }
         creating.add(ownerId);
@@ -144,4 +148,4 @@ function mountWxLoginRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 }
-module.exports = { mountWxLoginRoutes };
+module.exports = { mountWxLoginRoutes, hasLegacyWxTask };

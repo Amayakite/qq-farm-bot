@@ -55,6 +55,7 @@ function sweepExpiredTenants(ctx: AdminContext): { stopped: number; kicked: numb
     }
 
     for (const tenantId of blockedIds) {
+        ctx.scanTasks?.cancelTenant(String(tenantId));
         kicked += ctx.tokens.deleteByUserId(tenantId);
         kickSockets(ctx, tenantId as string);
         const accounts = byOwner.get(tenantId as string) || [];

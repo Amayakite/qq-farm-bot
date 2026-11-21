@@ -1,6 +1,6 @@
 import type { Application, Request, Response } from 'express';
 import type { AdminContext } from './context';
-import { cancelLoginTask, createLoginTask, getMiniappCode, QQ_MINIAPP_APP_ID, queryLoginStatus } from '../../services/qq-login/service';
+import { createQqLoginClient, QQ_MINIAPP_APP_ID } from '../../services/qq-login/service';
 export {};
 
 const { resolveAuthContext } = require('./middleware');
@@ -11,6 +11,7 @@ interface LoginTaskOwner {
     timer: NodeJS.Timeout;
     expiresAt: number;
     operation?: 'code' | 'cancel';
+    client: ReturnType<typeof createQqLoginClient>;
 }
 const taskOwners = new Map<string, LoginTaskOwner>();
 let creating = false; // The configured NapCat instance only handles one login workflow at a time.
@@ -58,15 +59,16 @@ function channelBusy(res: Response) {
 
 function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
     app.post('/api/qq-login/tasks', async (req: Request, res: Response) => {
-        if (creating || taskOwners.size) return channelBusy(res);
+        if (creating || taskOwners.size || ctx.scanTasks?.hasPending('qq')) return channelBusy(res);
         creating = true;
         const token = (req as any).adminToken;
         try {
-            const task = await createLoginTask();
+            const client = createQqLoginClient();
+            const task = await client.open();
             const { error } = resolveAuthContext(ctx, token);
             if (res.destroyed || error) {
                 // No client can receive the task ID and cancel it later.
-                await cancelLoginTask(task.taskId).catch(() => undefined);
+                await client.release(task.taskId).catch(() => undefined);
                 if (!res.destroyed && error) res.status(error.status).json(error.body);
                 return;
             }
@@ -76,7 +78,7 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
                 if (!taskOwners.get(task.taskId)?.operation) forgetTask(task.taskId);
             }, ttl);
             timer.unref();
-            taskOwners.set(task.taskId, { token, timer, expiresAt: Date.now() + ttl });
+            taskOwners.set(task.taskId, { token, timer, expiresAt: Date.now() + ttl, client });
             res.json({ ok: true, data: publicTask(task) });
         }
         catch (error: any) {
@@ -90,10 +92,10 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
 
     app.post('/api/qq-login/tasks/:taskId/status', async (req: Request, res: Response) => {
         try {
-            if (!findOwnedTask(req, res)) return;
-            const task = await queryLoginStatus(String(req.params.taskId || ''));
             const owner = findOwnedTask(req, res);
             if (!owner) return;
+            const task = await owner.client.status(String(req.params.taskId || ''));
+            if (!findOwnedTask(req, res)) return;
             if (!resolveAuthContext(ctx, (req as any).adminToken).auth) return res.status(401).json({ ok: false, error: 'Unauthorized' });
             if (!owner.operation && ['cancelled', 'expired', 'failed'].includes(task.status)) forgetTask(task.taskId);
             res.json({ ok: true, data: publicTask(task) });
@@ -110,7 +112,7 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
         const taskId = String(req.params.taskId || '');
         owner.operation = 'code';
         try {
-            const result = await getMiniappCode(taskId);
+            const result = await owner.client.authorize(taskId);
             forgetTask(taskId);
             if (!resolveAuthContext(ctx, (req as any).adminToken).auth) return res.status(401).json({ ok: false, error: 'Unauthorized' });
             res.json({ ok: true, data: { code: result.code, nickname: result.nickname || '', app_id: QQ_MINIAPP_APP_ID } });
@@ -130,7 +132,7 @@ function mountQqLoginRoutes(app: Application, ctx: AdminContext): void {
         const taskId = String(req.params.taskId || '');
         owner.operation = 'cancel';
         try {
-            await cancelLoginTask(taskId);
+            await owner.client.release(taskId);
             forgetTask(taskId);
             res.json({ ok: true });
         }

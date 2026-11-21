@@ -82,12 +82,12 @@ function normalizeTask(raw: any): QqLoginTask {
     };
 }
 
-async function requestNapCat(path: string, body: Record<string, unknown>, requireOk = true): Promise<any> {
-    const settings = loginSettings();
+async function requestNapCat(settings: LoginSettings, path: string, body: Record<string, unknown>, requireOk = true, signal?: AbortSignal): Promise<any> {
     let response;
     try {
         response = await axios.post(apiUrl(settings.napCatEndpoint, path), body, {
             timeout: REQUEST_TIMEOUT_MS,
+            signal,
             validateStatus: status => status === 200,
             headers: {
                 'Content-Type': 'application/json',
@@ -108,31 +108,31 @@ async function requestNapCat(path: string, body: Record<string, unknown>, requir
     return data;
 }
 
-async function createLoginTask(): Promise<QqLoginTask> {
-    const task = normalizeTask(await requestNapCat('/api/qq/login/qrcode', {}));
+async function createLoginTask(settings: LoginSettings): Promise<QqLoginTask> {
+    const task = normalizeTask(await requestNapCat(settings, '/api/qq/login/qrcode', {}));
     if (!task.qrImage)
         throw new Error('NapCat 未返回新的登录二维码');
     return task;
 }
 
-async function queryLoginStatus(taskId: string): Promise<QqLoginTask> {
+async function queryLoginStatus(taskId: string, settings: LoginSettings, signal?: AbortSignal): Promise<QqLoginTask> {
     const id = String(taskId || '').trim();
     if (!id)
         throw new Error('登录任务 ID 不能为空');
-    const data = await requestNapCat('/api/qq/login/status', {
+    const data = await requestNapCat(settings, '/api/qq/login/status', {
         taskId: id,
         refresh: false,
-    }, false);
+    }, false, signal);
     if (data?.ok !== true && !['cancelled', 'expired', 'failed'].includes(data?.task?.status))
         throw new Error(napCatErrorMessage(data));
     return normalizeTask(data);
 }
 
-async function getMiniappCode(taskId: string): Promise<QqMiniappLoginResult> {
+async function getMiniappCode(taskId: string, settings: LoginSettings): Promise<QqMiniappLoginResult> {
     const id = String(taskId || '').trim();
     if (!id)
         throw new Error('登录任务 ID 不能为空');
-    const data = await requestNapCat('/api/qq/miniapp/code', {
+    const data = await requestNapCat(settings, '/api/qq/miniapp/code', {
         taskId: id,
         appId: QQ_MINIAPP_APP_ID,
     });
@@ -143,21 +143,35 @@ async function getMiniappCode(taskId: string): Promise<QqMiniappLoginResult> {
     return nickname ? { code, nickname } : { code };
 }
 
-async function cancelLoginTask(taskId: string): Promise<void> {
+async function cancelLoginTask(taskId: string, settings: LoginSettings): Promise<void> {
     const id = String(taskId || '').trim();
     if (!id)
         throw new Error('登录任务 ID 不能为空');
-    const data = await requestNapCat('/api/qq/logout', {
+    const data = await requestNapCat(settings, '/api/qq/logout', {
         taskId: id,
     }, false);
     if (data?.ok !== true && data?.code !== 'TASK_EXPIRED')
         throw new Error(napCatErrorMessage(data));
 }
 
-export {
-    cancelLoginTask,
-    createLoginTask,
-    getMiniappCode,
-    QQ_MINIAPP_APP_ID,
-    queryLoginStatus,
-};
+function createQqLoginClient() {
+    // Every request for a task must reach the instance that issued its QR.
+    const settings = { ...loginSettings() };
+    return {
+        async open() {
+            const response = await axios.get(apiUrl(settings.napCatEndpoint, '/api/health'), {
+                timeout: 4000,
+                validateStatus: status => status === 200 || status === 404 || status === 405,
+            }).catch(() => { throw new Error('无法检查 QQ 扫码服务状态'); });
+            if (response.data?.workflowBusy === true && response.data?.logoutRecoveryRequired !== true) {
+                throw Object.assign(new Error('QQ 扫码通道正在使用'), { code: 'WORKFLOW_BUSY' });
+            }
+            return createLoginTask(settings);
+        },
+        status: (id: string, signal?: AbortSignal) => queryLoginStatus(id, settings, signal),
+        authorize: (id: string) => getMiniappCode(id, settings),
+        release: (id: string) => cancelLoginTask(id, settings),
+    };
+}
+
+export { createQqLoginClient, QQ_MINIAPP_APP_ID };

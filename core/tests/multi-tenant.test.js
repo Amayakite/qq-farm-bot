@@ -58,11 +58,11 @@ test('QQ 二维码请求断开后释放晚到的任务，随后可以再次取�
     let complete;
     const cancelled = [];
     const service = {
-        createLoginTask: () => new Promise(resolve => { complete = resolve; }),
-        cancelLoginTask: async id => { cancelled.push(id); },
+        open: () => new Promise(resolve => { complete = resolve; }),
+        release: async id => { cancelled.push(id); },
     };
     const { mountQqLoginRoutes } = load('controllers/admin/qq-login-routes.js', {
-        '../../services/qq-login/service': service,
+        '../../services/qq-login/service': { createQqLoginClient: () => service },
         './middleware': { resolveAuthContext: () => ({ auth: {} }) },
     });
     const routes = new Map();
@@ -99,14 +99,14 @@ test('QQ 扫码通道忙时允许稍后重试，其他会话不能读取或取�
     let finishCode;
     const routes = new Map();
     const { mountQqLoginRoutes } = load('controllers/admin/qq-login-routes.js', {
-        '../../services/qq-login/service': {
-            createLoginTask: async () => {
+        '../../services/qq-login/service': { createQqLoginClient: () => ({
+            open: async () => {
                 if (providerBusy) throw Object.assign(new Error('busy'), { code: 'WORKFLOW_BUSY' });
                 return { taskId: 'task', status: 'waiting_scan', qrImage: 'fake-qr-image', expiresAt: Date.now() + 30_000 };
             },
-            getMiniappCode: () => new Promise(resolve => { finishCode = resolve; }),
-            cancelLoginTask: async () => assert.fail('A concurrent or foreign request cannot cancel this task'),
-        },
+            authorize: () => new Promise(resolve => { finishCode = resolve; }),
+            release: async () => assert.fail('A concurrent or foreign request cannot cancel this task'),
+        }) },
         './middleware': { resolveAuthContext: () => ({ auth: {} }) },
     });
     mountQqLoginRoutes({ post: (path, handler) => routes.set(path, handler) }, {});

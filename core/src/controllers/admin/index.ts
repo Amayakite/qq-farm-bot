@@ -23,6 +23,7 @@ const { mountActivityCenterRoutes } = require('./activity-center-routes');
 const { mountCommerceRoutes } = require('./commerce-routes');
 const { mountWxLoginRoutes } = require('./wx-login-routes');
 const { mountQqLoginRoutes } = require('./qq-login-routes');
+const { mountAccountScanRoutes } = require('./account-scan-routes');
 const { mountTenantRoutes } = require('./tenant-routes');
 const { startTenantLifecycle } = require('../../services/tenant-lifecycle');
 const {
@@ -83,6 +84,7 @@ function startAdminServer(dataProvider: any): void {
 
     // Mount route modules
     mountAuthRoutes(app, ctx);
+    mountAccountScanRoutes(app, ctx);
     mountWxLoginRoutes(app, ctx);
     mountQqLoginRoutes(app, ctx);
     mountFarmRoutes(app, ctx);
@@ -108,6 +110,7 @@ function startAdminServer(dataProvider: any): void {
     ctx.server = app.listen(port, '0.0.0.0', () => {
         adminLogger.info('admin panel started', { url: `http://localhost:${port}`, port });
     });
+    ctx.server.once('close', () => ctx?.scanTasks?.dispose());
 
     // Setup Socket.IO
     setupSocketIO(ctx);

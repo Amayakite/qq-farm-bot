@@ -121,6 +121,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         const result = userStore.updateTenant(req.params.id, { status });
         if (!result.ok) return res.status(400).json({ ok: false, error: result.message, errorType: result.error });
         if (result.user.status === 'disabled') {
+            ctx.scanTasks?.cancelTenant(String(req.params.id));
             ctx.tokens.deleteByUserId(String(req.params.id));
             kickSockets(ctx, String(req.params.id));
             for (const account of tenantAccountList(ctx, String(req.params.id))) {
@@ -171,6 +172,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         }
         try {
             userStore.updateTenant(target.id, { status: 'disabled' });
+            ctx.scanTasks?.cancelTenant(target.id);
             ctx.tokens.deleteByUserId(target.id);
             kickSockets(ctx, target.id);
             const accounts = tenantAccountList(ctx, target.id);
