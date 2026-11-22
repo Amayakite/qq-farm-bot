@@ -9,6 +9,7 @@ const GET_QR = '/QQLogin/GetQQLoginQrcode';
 const RESTART = '/QQLogin/RestartNapCat';
 const STARTUP_WAIT_MS = 12_000;
 const RETRY_DELAY_MS = 15_000;
+const RECOVERY_DELAYS_MS = [5, 15, 45, 60].map(minutes => minutes * 60_000);
 const recoverable = new Set(['offline', 'reconnecting', 'generating_qrcode', 'waiting_qrcode']);
 
 export function logoutConfirmedByWebUi(status) {
@@ -59,7 +60,8 @@ export function requestNapcatRecreate(directory) {
 export function createQrReadiness({ call, clearCredential, recreate, report = () => {}, now = Date.now, wait = sleep }) {
   let state = 'unknown';
   let retryAfter = 0;
-  let recoveredThisOutage = false;
+  let recoverAfter = 0;
+  let recoveryBackoffIndex = 0;
   let recoveryRequest;
 
   async function fresh() {
@@ -75,7 +77,8 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
   function succeeded(qr) {
     state = 'ready';
     retryAfter = 0;
-    recoveredThisOutage = false;
+    recoverAfter = 0;
+    recoveryBackoffIndex = 0;
     return qr;
   }
 
@@ -114,7 +117,15 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
   }
 
   return {
-    health: () => ({ qrReadiness: state, qrRetryAfterMs: Math.max(0, retryAfter - now()), qrRecoveryRequest: recoveryRequest }),
+    health() {
+      const currentTime = now();
+      return {
+        qrReadiness: state,
+        qrRetryAfterMs: Math.max(0, retryAfter - currentTime),
+        qrRecoveryRetryAfterMs: Math.max(0, recoverAfter - currentTime),
+        qrRecoveryRequest: recoveryRequest,
+      };
+    },
     invalidate() { state = 'unknown'; retryAfter = 0; },
     async open() {
       if (retryAfter > now()) throw unavailable();
@@ -129,10 +140,10 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
       if (activeLogin(current)) throw blocked();
       const refreshFailed = failure?.code === 'QQ_QR_UNAVAILABLE'
         || /二维码刷新超时|未接受二维码刷新请求|QQ_LOGIN_SERVICE_RESTARTING|QRCode Get Error/i.test(failure?.message || '');
-      if (!recoveredThisOutage && refreshFailed && logoutConfirmedByWebUi(current)) {
-        // A failed recovery stays latched until a real fresh QR succeeds.
-        // A queue of tenants must never become a loop of worker restarts.
-        recoveredThisOutage = true;
+      if (now() >= recoverAfter && refreshFailed && logoutConfirmedByWebUi(current)) {
+        // Allow another recovery on demand after backoff, even if no fresh QR has succeeded yet.
+        recoverAfter = now() + RECOVERY_DELAYS_MS[recoveryBackoffIndex];
+        recoveryBackoffIndex = Math.min(recoveryBackoffIndex + 1, RECOVERY_DELAYS_MS.length - 1);
         state = 'recovering';
         report('recovery_started');
         try {
