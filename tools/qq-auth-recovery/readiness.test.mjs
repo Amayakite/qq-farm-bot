@@ -42,15 +42,17 @@ test('restarts a confirmed offline worker once and returns only a proven new QR'
   assert.deepEqual(reports, ['recovery_started', 'recovery_succeeded']);
 });
 
-test('an unavailable provider backs off and never loops worker restarts in the same outage', async () => {
+test('retries failed recovery on demand with bounded backoff and resets after a fresh QR', async () => {
   let now = 0;
   let calls = 0;
   let restarts = 0;
+  let recreations = 0;
   let working = false;
   const reader = createQrReadiness({
     now: () => now,
     wait: async ms => { now += ms; },
     clearCredential() {},
+    async recreate() { recreations++; },
     async call(path) {
       calls++;
       if (path.endsWith('CheckLoginStatus')) return offline;
@@ -64,13 +66,33 @@ test('an unavailable provider backs off and never loops worker restarts in the s
   await assert.rejects(reader.open(), { code: 'QQ_QR_UNAVAILABLE' });
   assert.equal(calls, prior);
   assert.equal(reader.health().qrRetryAfterMs, 15_000);
+  assert.equal(reader.health().qrRecoveryRetryAfterMs, 5 * 60_000 - now);
   now += 15_001;
   await assert.rejects(reader.open(), { code: 'QQ_QR_UNAVAILABLE' });
   assert.equal(restarts, 1);
-  now += 15_001;
+  assert.equal(recreations, 1);
+  reader.invalidate();
+  await assert.rejects(reader.open(), { code: 'QQ_QR_UNAVAILABLE' });
+  assert.equal(restarts, 1);
+  for (const [index, delayMinutes] of [15, 45, 60, 60].entries()) {
+    now += reader.health().qrRecoveryRetryAfterMs;
+    assert.equal(restarts, index + 1);
+    const started = now;
+    await assert.rejects(reader.open(), { code: 'QQ_QR_UNAVAILABLE' });
+    assert.equal(restarts, index + 2);
+    assert.equal(recreations, restarts);
+    assert.equal(reader.health().qrRecoveryRetryAfterMs, delayMinutes * 60_000 - (now - started));
+  }
+  now += 15_000;
   working = true;
   assert.equal(await reader.open(), 'restored-qr');
   assert.equal(reader.health().qrRetryAfterMs, 0);
+  assert.equal(reader.health().qrRecoveryRetryAfterMs, 0);
+  working = false;
+  const started = now;
+  await assert.rejects(reader.open(), { code: 'QQ_QR_UNAVAILABLE' });
+  assert.equal(restarts, 6);
+  assert.equal(reader.health().qrRecoveryRetryAfterMs, 5 * 60_000 - (now - started));
 });
 
 test('uses container recreation only after worker recovery fails, then verifies a fresh code', async () => {
