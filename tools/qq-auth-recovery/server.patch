@@ -1,7 +1,7 @@
 --- a/server.js
 +++ b/server.js
 @@ -8,0 +9 @@
-+import { createQrReadiness, logoutConfirmedByWebUi, requestNapcatRecreate } from "./qr-readiness.mjs";
++import { createQrReadiness, logoutNapcat, requestNapcatRecreate } from "./qr-readiness.mjs";
 @@ -42,0 +44,6 @@
 +const qrReadiness = createQrReadiness({
 +  call: webUiCall,
@@ -42,12 +42,67 @@
 +    qrUrl: /^https?:\/\//i.test(qrValue) ? qrValue : undefined,
 +    qrImage
 +  });
-@@ -819,0 +809 @@
-+    qrReadiness.invalidate();
-@@ -820,0 +811,4 @@
-+      const status = await webUiCall("/QQLogin/CheckLoginStatus").catch(() => null);
-+      // A clean logout does not need a worker restart. The next workflow
-+      // must independently prove readiness by obtaining a fresh QR.
-+      if (logoutConfirmedByWebUi(status)) return result;
-@@ -1233,0 +1228 @@
+@@ -807,39 +796,8 @@
+-  const result = await bridgeCall(config.bridgeLogoutPath, {
+-    method: "POST",
+-    body: { source: "qq-miniapp-auth", taskId }
+-  });
+-  if (result?.loggedOut !== true) {
+-    const error = new Error(result?.error || "NapCat logout did not complete");
+-    error.payload = result;
+-    throw error;
+-  }
+-  // NapCat 4.18.x can tear down the native wrapper session while leaving its
+-  // WebUI QQLoginStatus flag set in memory. Ask NapCat to restart its worker
+-  // so the next QR request is accepted as a fresh login.
+-  if (isWebUiConfigured()) {
+-    try {
+-      await webUiCall("/QQLogin/RestartNapCat");
+-      await new Promise((resolve) => setTimeout(resolve, 1_000));
+-      let lastStatus;
+-      for (let attempt = 0; attempt < 24; attempt += 1) {
+-        try {
+-          lastStatus = await webUiCall("/QQLogin/CheckLoginStatus");
+-          if (lastStatus?.isLogin !== true) break;
+-        } catch {
+-          // The worker can be briefly unavailable while it is restarting.
+-        }
+-        await new Promise((resolve) => setTimeout(resolve, 250));
+-      }
+-      if (!lastStatus || typeof lastStatus.isLogin !== "boolean") {
+-        const error = new Error("NapCat worker restart status could not be verified");
+-        error.payload = { logout: result };
+-        throw error;
+-      }
+-      if (lastStatus.isLogin === true) {
+-        const error = new Error("NapCat worker restart did not clear the login state");
+-        error.payload = { logout: result, status: lastStatus };
+-        throw error;
+-      }
+-      return { ...result, workerRestarted: true };
+-    } catch (error) {
+-      if (!error.payload) error.payload = { logout: result };
++  const requestLogout = async () => {
++    const result = await bridgeCall(config.bridgeLogoutPath, {
++      method: "POST",
++      body: { source: "qq-miniapp-auth", taskId }
++    });
++    if (result?.loggedOut !== true) {
++      const error = new Error(result?.error || "NapCat logout did not complete");
++      error.payload = result;
+@@ -848,2 +806,11 @@
+-  }
+-  return result;
++    return result;
++  };
++  if (!isWebUiConfigured()) return requestLogout();
++
++  qrReadiness.invalidate();
++  return logoutNapcat({
++    call: webUiCall,
++    requestLogout,
++    clearCredential: () => { webUiCredential = ""; },
++    report: outcome => console.info(JSON.stringify({ event: "qq_logout", outcome }))
++  });
+@@ -1233,0 +1201 @@
 +        ...qrReadiness.health(),
