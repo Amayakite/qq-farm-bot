@@ -14,7 +14,7 @@ const RECOVERY_DELAYS_MS = [5, 15, 45, 60].map(minutes => minutes * 60_000);
 const recoverable = new Set(['offline', 'reconnecting', 'generating_qrcode', 'waiting_qrcode']);
 
 export function logoutConfirmedByWebUi(status) {
-  return status?.isLogin === false && recoverable.has(status.loginPhase)
+  return status?.isLogin === false && status.isOffline !== true && recoverable.has(status.loginPhase)
     && status.coreReady === false && status.qrLoginAccepted === false;
 }
 
@@ -63,7 +63,7 @@ export async function logoutNapcat({ call, requestLogout, clearCredential, repor
 }
 
 function activeLogin(status) {
-  return status?.qrLoginAccepted === true || status?.coreReady === true
+  return status?.qrLoginAccepted === true || status?.coreReady === true || status?.isOffline === true
     || status?.loginPhase === 'initializing' || status?.loginPhase === 'qrcode_scanned'
     || (typeof status?.loginPhase === 'string' && status.isLogin === true);
 }
@@ -109,14 +109,18 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
   let recoveryBackoffIndex = 0;
   let recoveryRequest;
 
-  async function fresh() {
-    const current = await call(CHECK);
-    if (activeLogin(current)) throw blocked();
+  async function refresh(current) {
     const answer = await call(REFRESH);
     if (answer?.restarting === true) throw unavailable();
     const qr = qrFrom(answer) || qrFrom(await call(GET_QR));
     if (!qr || (typeof current?.loginPhase === 'string' && qr === qrFrom(current))) throw unavailable();
     return qr;
+  }
+
+  async function fresh() {
+    const current = await call(CHECK);
+    if (activeLogin(current)) throw blocked();
+    return refresh(current);
   }
 
   function succeeded(qr) {
@@ -162,6 +166,14 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
   }
 
   return {
+    async replacePendingQr() {
+      const current = await call(CHECK);
+      if (!qrFrom(current) || !['waiting_qrcode', 'qrcode_scanned'].includes(current?.loginPhase)
+        || current.isLogin !== false || current.coreReady !== false
+        || current.qrLoginAccepted !== false || current.isOffline === true) return false;
+      await refresh(current);
+      return logoutConfirmedByWebUi(await call(CHECK));
+    },
     health() {
       const currentTime = now();
       return {

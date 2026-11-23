@@ -186,6 +186,7 @@ test('uses container recreation only after worker recovery fails, then verifies 
 test('fails closed while another login is active or awaiting its confirmation', async () => {
   for (const state of [{ ...offline, loginPhase: 'initializing', qrLoginAccepted: true },
     { ...offline, loginPhase: 'ready', isLogin: true, coreReady: true },
+    { ...offline, isOffline: true },
     { ...offline, loginPhase: 'qrcode_scanned' }]) {
     const reader = createQrReadiness({
       async call(path) { assert.ok(path.endsWith('CheckLoginStatus')); return state; },

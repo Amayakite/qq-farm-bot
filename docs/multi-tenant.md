@@ -84,6 +84,7 @@
 
 - 使用独立 `qq-miniapp-auth` 容器的部署，可以从本仓库运行 `bash tools/qq-auth-recovery/install.sh /opt/services/qq-farm-classic`。脚本校验授权服务源码提交 `ec3123a06ca09ebd7759cc61e96801f1fde6c78e`，只在空闲时套用 Compose 覆盖并重建 `qq-auth`，启动失败时恢复之前的容器配置。
 - 清理上一轮 QQ 登录时，授权服务先检查 NapCat 的登录状态。仅在明确没有已登录或已确认的会话时，才清除遗留的注销失败标记。桥接插件断开或 Worker 重启后，需要重新核实退出状态才能释放通道。授权服务以 `qq_logout` 事件记录核验结果。
+- 小程序授权成功、失败或过期后，当前任务持有 QQ 通道直到注销收尾。取消尚未确认的扫码时，服务检查 QQ 当前状态并替换旧码。可在本地把 `QQ_AUTH_TEST_MODULE` 指向已应用补丁且已安装依赖的授权服务 `server.js`，运行 `node --test tools/qq-auth-recovery/*.test.mjs` 验证连续两位用户的交接。
 - QQ 客户端确认退出后，下一轮以实际生成新码验证就绪。取码失败且确认 NapCat 离线时，每轮至多尝试一次 Worker 恢复。仍无法取码时，宿主机的 `qq-farm-qr-recovery.path` 接受当前授权流程验证过的请求，按原镜像重建 NapCat 一次，保留持久化挂载。下一次恢复由新的取码请求触发，间隔依次为 5、15、45 分钟，最长 60 分钟。成功生成新码后重置间隔。授权服务健康接口的 `qrReadiness`、`qrRetryAfterMs` 和 `qrRecoveryRetryAfterMs` 分别记录就绪状态、取码退避和恢复退避。
 - 覆盖文件随部署保留在 `auth-deploy/recovery/current`。维护授权容器时沿用两份 Compose 文件，或重新运行安装脚本。农场容器和持久化目录沿用现有部署流程。
 
