@@ -9,7 +9,18 @@
 +  recreate: requestNapcatRecreate(process.env.QQ_AUTH_RECOVERY_CONTROL),
 +  report: (event) => console.info(JSON.stringify({ event: "qq_qr_readiness", outcome: event }))
 +});
-@@ -527,25 +534,7 @@
+@@ -211 +218 @@
+-  if (activeWorkflow && activeWorkflow.expiresAt <= Date.now()) {
++  if (activeWorkflow && !activeWorkflow.logoutPromise && activeWorkflow.expiresAt <= Date.now()) {
+@@ -453,7 +459,0 @@
+-}
+-
+-function pickQrValue(result) {
+-  if (typeof result === "string") return result;
+-  if (!result || typeof result !== "object") return undefined;
+-  return result.qrcode || result.qrCode || result.qrUrl || result.qr_url ||
+-    result.image || result.imageUrl || result.image_url || result.base64;
+@@ -527,25 +527,7 @@
 -  try {
 -    try {
 -      await webUiCall("/QQLogin/RefreshQRcode");
@@ -42,7 +53,40 @@
 +    qrUrl: /^https?:\/\//i.test(qrValue) ? qrValue : undefined,
 +    qrImage
 +  });
-@@ -807,39 +796,8 @@
+@@ -590 +572,2 @@
+-  const explicitScanned = truthyField(result, ["scanned", "isScanned", "isScan", "scan", "hasScan", "hasScanned", "qrcodeScanned", "qrScanned", "scanSuccess", "isScanSuccess"]) ||
++  const scanAccepted = result?.loginPhase === "qrcode_scanned" || result?.loginPhase === "initializing" || result?.qrLoginAccepted === true;
++  const explicitScanned = scanAccepted || truthyField(result, ["scanned", "isScanned", "isScan", "scan", "hasScan", "hasScanned", "qrcodeScanned", "qrScanned", "scanSuccess", "isScanSuccess"]) ||
+@@ -674,4 +657,3 @@
+-  workflow.loginTaskId = task.id;
+-  workflow.miniappTaskId = "";
+-  workflow.phase = "login";
+-  workflow.expiresAt = Date.now() + config.workflowTtlMs;
++  if (workflow.miniappTaskId || workflow.miniappStartPromise || workflow.logoutPromise) {
++    throw makeWorkflowBusyError(workflow);
++  }
+@@ -678,0 +661,2 @@
++    workflow.loginTaskId = task.id;
++    workflow.phase = "login";
+@@ -682,0 +667 @@
++    workflow.expiresAt = Math.max(workflow.expiresAt, task.expiresAt);
+@@ -691,3 +676 @@
+-  await webUiCall("/QQLogin/RefreshQRcode");
+-  const result = await webUiCall("/QQLogin/GetQQLoginQrcode");
+-  const qrValue = pickQrValue(result);
++  const qrValue = await qrReadiness.open();
+@@ -705,0 +689 @@
++    activeWorkflow.loginTaskId = task.id;
+@@ -793,7 +777 @@
+-    if (task.status === "success" && !task.code) {
+-      task.status = "failed";
+-      task.error = "Bridge reported success without an authorization code";
+-    }
+-    if (task.status === "success") await finalizeMiniappTask(task);
+-    else if (["failed", "expired", "login_required"].includes(task.status)) releaseWorkflow(ownerKey);
+-    return task;
++    return finalizeMiniappTask(task);
+@@ -807,39 +785,8 @@
 -  const result = await bridgeCall(config.bridgeLogoutPath, {
 -    method: "POST",
 -    body: { source: "qq-miniapp-auth", taskId }
@@ -90,13 +134,21 @@
 +    if (result?.loggedOut !== true) {
 +      const error = new Error(result?.error || "NapCat logout did not complete");
 +      error.payload = result;
-@@ -848,2 +806,11 @@
+@@ -848,3 +795,3 @@
 -  }
 -  return result;
+-}
 +    return result;
 +  };
 +  if (!isWebUiConfigured()) return requestLogout();
-+
+@@ -852,7 +799,22 @@
+-async function requestNapcatLoginCancel() {
+-  if (!isWebUiConfigured()) return;
+-  try {
+-    await webUiCall("/QQLogin/CancelLogin");
+-  } catch {
+-    // Some NapCat versions do not expose a cancel endpoint. Releasing the
+-    // local task is still sufficient; the next QR request refreshes it.
 +  qrReadiness.invalidate();
 +  return logoutNapcat({
 +    call: webUiCall,
@@ -104,5 +156,58 @@
 +    clearCredential: () => { webUiCredential = ""; },
 +    report: outcome => console.info(JSON.stringify({ event: "qq_logout", outcome }))
 +  });
-@@ -1233,0 +1201 @@
++}
++
++function logoutOwnedTask(task) {
++  const workflow = requireWorkflowOwner(task.ownerKey);
++  if (!workflow.logoutPromise) {
++    workflow.logoutPromise = (async () => {
++      if (task.kind === "napcat-login" && task.mode === "webui-api" && !task.confirmed) {
++        // The pinned NapCat has no CancelLogin route. Retire the displayed QR
++        // while the task still owns the client, including a scan awaiting confirmation.
++        if (await qrReadiness.replacePendingQr()) {
++          return { loggedOut: true, method: "NapCat QR replaced" };
++        }
++      }
++      return requestNapcatLogout(task.id);
++    })();
+@@ -859,0 +822 @@
++  return workflow.logoutPromise;
+@@ -864 +827 @@
+-  if (task.status === "success" && task.logoutStatus === "success" && task.released) {
++  if (task.released || task.ownerKey !== activeWorkflow?.ownerKey) {
+@@ -892 +855 @@
+-  const needsLogout = task.kind === "miniapp-login" || task.status === "success";
++  const needsLogout = task.kind === "miniapp-login" || task.mode === "webui-api" || task.status === "success";
+@@ -900,2 +862,0 @@
+-  } else if (task.kind === "napcat-login" && !needsLogout) {
+-    await requestNapcatLoginCancel();
+@@ -921 +882 @@
+-      const result = await requestNapcatLogout(task.id);
++      const result = await logoutOwnedTask(task);
+@@ -986 +947,6 @@
+-  if (!task || task.status !== "success" || !task.code) return task;
++  if (task.status === "success" && !task.code) {
++    task.status = "failed";
++    task.error = "Bridge reported success without an authorization code";
++  }
++  if (!["success", "failed", "login_required", "expired", "cancelled"].includes(task.status)) return task;
++  if (task.released || task.ownerKey !== activeWorkflow?.ownerKey) return task;
+@@ -992 +958 @@
+-      const result = await requestNapcatLogout(task.id);
++      const result = await logoutOwnedTask(task);
+@@ -1033,11 +999 @@
+-  if (task.status === "success" && !task.code) {
+-    task.status = "failed";
+-    task.error = "Bridge reported success without an authorization code";
+-  }
+-  if (task.status === "success") await finalizeMiniappTask(task);
+-  else if (["expired", "cancelled"].includes(task.status) && !task.logoutStatus) {
+-    await cancelTask(task, task.error || "小程序授权任务已取消", { expired: task.status === "expired" });
+-  } else if (["failed", "expired", "cancelled", "login_required"].includes(task.status) && !["pending", "failed"].includes(task.logoutStatus)) {
+-    releaseWorkflow(task.ownerKey);
+-  }
+-  return task;
++  return finalizeMiniappTask(task);
+@@ -1233,0 +1190 @@
 +        ...qrReadiness.health(),
