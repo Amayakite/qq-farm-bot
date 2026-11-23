@@ -1,9 +1,71 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createQrReadiness, logoutConfirmedByWebUi } from './readiness.mjs';
+import { createQrReadiness, logoutConfirmedByWebUi, logoutNapcat } from './readiness.mjs';
 
 const offline = { isLogin: false, loginPhase: 'offline', qrLoginAccepted: false, coreReady: false };
 const timeout = () => new Error('二维码刷新超时：QQ 登录服务未返回新的二维码');
+
+test('an already signed-out client clears a stale logout requirement without using the inactive plugin', async () => {
+  const reports = [];
+  const result = await logoutNapcat({
+    async call(path) {
+      assert.ok(path.endsWith('CheckLoginStatus'));
+      return { ...offline, loginPhase: 'waiting_qrcode' };
+    },
+    requestLogout: () => assert.fail('The login plugin is disabled while signed out'),
+    clearCredential: () => assert.fail('The worker does not need to restart'),
+    report: event => reports.push(event),
+  });
+  assert.equal(result.loggedOut, true);
+  assert.deepEqual(reports, ['already_offline']);
+});
+
+test('a logout bridge error clears only after a complete offline status arrives', async () => {
+  let time = 0;
+  let confirmed = true;
+  const bridgeError = new Error('The login plugin disconnected');
+  const hooks = {
+    now: () => time,
+    wait: async ms => { time += ms; },
+    async call(path) {
+      assert.ok(path.endsWith('CheckLoginStatus'));
+      if (time === 0) return { ...offline, loginPhase: 'ready', isLogin: true, coreReady: true };
+      if (confirmed && time >= 1_000) return offline;
+      return { isLogin: false, loginPhase: 'offline' };
+    },
+    async requestLogout() { throw bridgeError; },
+  };
+  assert.equal((await logoutNapcat(hooks)).loggedOut, true);
+  assert.equal(time, 1_000);
+  confirmed = false;
+  time = 0;
+  await assert.rejects(logoutNapcat(hooks), error => error === bridgeError);
+});
+
+test('a successful bridge waits for explicit logout across a slow worker restart', async () => {
+  let time = 0;
+  let restartedAt;
+  let credentialCleared = false;
+  const result = await logoutNapcat({
+    now: () => time,
+    wait: async ms => { time += ms; },
+    async call(path) {
+      if (path.endsWith('RestartNapCat')) {
+        restartedAt = time;
+        throw new Error('Socket closed during restart');
+      }
+      assert.ok(path.endsWith('CheckLoginStatus'));
+      if (restartedAt === undefined) return { ...offline, loginPhase: 'ready', isLogin: true, coreReady: true };
+      assert.equal(credentialCleared, true);
+      if (time - restartedAt < 3_500) throw new Error('WebUI not accepting connections');
+      return offline;
+    },
+    async requestLogout() { return { loggedOut: true, method: 'fixture' }; },
+    clearCredential: () => { credentialCleared = true; },
+  });
+  assert.deepEqual(result, { loggedOut: true, method: 'fixture', workerRestarted: true });
+  assert.ok(time - restartedAt >= 3_500);
+});
 
 test('prefers the fresh QR from RefreshQRcode and ignores the prior value', async () => {
   const operations = [];

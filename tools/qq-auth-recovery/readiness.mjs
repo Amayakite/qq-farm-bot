@@ -8,13 +8,58 @@ const REFRESH = '/QQLogin/RefreshQRcode';
 const GET_QR = '/QQLogin/GetQQLoginQrcode';
 const RESTART = '/QQLogin/RestartNapCat';
 const STARTUP_WAIT_MS = 12_000;
+const LOGOUT_SETTLE_MS = 2_000;
 const RETRY_DELAY_MS = 15_000;
 const RECOVERY_DELAYS_MS = [5, 15, 45, 60].map(minutes => minutes * 60_000);
 const recoverable = new Set(['offline', 'reconnecting', 'generating_qrcode', 'waiting_qrcode']);
 
 export function logoutConfirmedByWebUi(status) {
   return status?.isLogin === false && recoverable.has(status.loginPhase)
-    && status.coreReady !== true && status.qrLoginAccepted !== true;
+    && status.coreReady === false && status.qrLoginAccepted === false;
+}
+
+export async function logoutNapcat({ call, requestLogout, clearCredential, report = () => {}, now = Date.now, wait = sleep }) {
+  async function waitUntilOffline(timeoutMs) {
+    const deadline = now() + timeoutMs;
+    while (true) {
+      const status = await call(CHECK).catch(() => null);
+      if (logoutConfirmedByWebUi(status)) return true;
+      const remaining = deadline - now();
+      if (remaining <= 0) return false;
+      await wait(Math.min(500, remaining));
+    }
+  }
+
+  if (await waitUntilOffline(0)) {
+    report('already_offline');
+    return { loggedOut: true, method: 'NapCat WebUI confirmed offline' };
+  }
+
+  let result;
+  try {
+    result = await requestLogout();
+  } catch (error) {
+    // The login plugin can disconnect before acknowledging a successful logout.
+    if (!(await waitUntilOffline(LOGOUT_SETTLE_MS))) {
+      report('bridge_logout_unconfirmed');
+      throw error;
+    }
+    report('offline_after_bridge_error');
+    return { loggedOut: true, method: 'NapCat WebUI confirmed offline' };
+  }
+  if (await waitUntilOffline(LOGOUT_SETTLE_MS)) return result;
+
+  // Restarting can close the request before NapCat delivers its response.
+  const restartError = await call(RESTART).then(() => undefined, error => error);
+  clearCredential();
+  if (await waitUntilOffline(STARTUP_WAIT_MS)) {
+    report('offline_after_restart');
+    return { ...result, workerRestarted: true };
+  }
+  report('offline_unconfirmed');
+  throw Object.assign(new Error('NapCat logout could not be verified', { cause: restartError }), {
+    payload: { logout: result },
+  });
 }
 
 function activeLogin(status) {
