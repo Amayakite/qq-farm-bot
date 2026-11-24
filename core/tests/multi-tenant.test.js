@@ -593,7 +593,7 @@ test('账号列表按租户过滤，跨租户解析返回空', () => {
     assert.equal(middleware.resolveAccId(ctx, '3', ownerAuth), '3');
 });
 
-test('账号读写响应只包含当前租户可见的账号且不回传 Code', () => {
+test('账号读写响应只包含当前租户可见的账号且不回传 Code', async () => {
     const accounts = [
         { id: '1', ownerId: 'owner', name: 'owner-account', code: 'owner-code' },
         { id: '2', ownerId: 'tenant-a', name: 'a-account', code: 'tenant-code' },
@@ -621,8 +621,27 @@ test('账号读写响应只包含当前租户可见的账号且不回传 Code', 
         routes.get(route)(req, res);
         assert.deepEqual(data, { accounts: [{ id: '2', ownerId: 'tenant-a', name: 'a-account' }] });
     }
-    routes.get('delete /api/accounts/:id')(req, res);
+    await routes.get('delete /api/accounts/:id')(req, res);
     assert.deepEqual(data, { accounts: [] });
+});
+
+test('系统发布与回滚接口统一经过 owner 权限检查', () => {
+    const { requireOwner } = load('controllers/admin/middleware.js');
+    const { mountSystemUpdateRoutes } = load('controllers/admin/system-update-routes.js', {
+        './middleware': { requireOwner },
+        '../../services/system-update': {},
+    });
+    const routes = [];
+    const app = Object.fromEntries(['use', 'get', 'post', 'put'].map(method => [
+        method, (path, handler) => routes.push({ method, path, handler }),
+    ]));
+    mountSystemUpdateRoutes(app);
+    const guard = routes.shift();
+    assert.equal(guard.method, 'use');
+    assert.equal(guard.path, '/api/system/update');
+    assert.equal(guard.handler, requireOwner);
+    assert.ok(routes.some(route => route.path.endsWith('/apply')));
+    assert.ok(routes.every(route => route.path.startsWith(guard.path + '/')));
 });
 
 test('首次设置密码的会话仅能验证、退出或修改密码', () => {

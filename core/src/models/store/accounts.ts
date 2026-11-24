@@ -42,7 +42,8 @@ function loadAccounts(): AccountsData {
         const raw = readJsonFileStrict(ACCOUNTS_FILE, () => ({ accounts: [], nextId: 1 }));
         if (!raw || !Array.isArray(raw.accounts)) throw new Error('Invalid accounts data');
         const data = normalizeAccountsData(raw);
-        publishAccounts(data);
+        if (raw.accounts.some((account: any) => !Number(account?.createdAt))) saveAccounts(data);
+        else publishAccounts(data);
         return cloneAccounts(data);
     } catch (error: any) {
         throw storageError('读取', ACCOUNTS_FILE, error);

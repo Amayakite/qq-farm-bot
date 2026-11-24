@@ -3,6 +3,7 @@ export {};
  * @deprecated Owner credentials now live in `users.json` (see `user-store.ts`).
  * Kept only for compatibility with older imports; the admin panel no longer uses it.
  */
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const { getDataFile, ensureDataDir } = require('../config/runtime-paths');
 const security = require('./auth-security');
@@ -63,6 +64,11 @@ function getAdminInfo(): { username: string; role: 'admin'; mustChangePassword: 
     return { username: current.username, role: 'admin', mustChangePassword: current.mustChangePassword === true };
 }
 
+function getCredentialFingerprint(): string {
+    const current = loadAdmin();
+    return crypto.createHash('sha256').update(`${current.username}:${current.password}`).digest('hex');
+}
+
 function validateAdmin(username: string, password: string, ip: string = 'unknown'): any {
     security.loadLoginAttempts();
     const rateLimit = security.checkRateLimit(ip);
@@ -99,4 +105,4 @@ function changePassword(oldPassword: string, newPassword: string): { ok: boolean
 
 loadAdmin();
 
-module.exports = { getAdminInfo, validateAdmin, changePassword };
+module.exports = { getAdminInfo, getCredentialFingerprint, validateAdmin, changePassword };

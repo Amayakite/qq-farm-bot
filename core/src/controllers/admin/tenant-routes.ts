@@ -115,7 +115,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         return res.json({ ok: true, data: result.user });
     });
 
-    app.post('/api/admin/tenants/:id/status', (req: Request, res: Response) => {
+    app.post('/api/admin/tenants/:id/status', async (req: Request, res: Response) => {
         const previous = userStore.getUserById(req.params.id);
         const status = String((req.body || {}).status || '');
         const result = userStore.updateTenant(req.params.id, { status });
@@ -125,7 +125,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
             ctx.tokens.deleteByUserId(String(req.params.id));
             kickSockets(ctx, String(req.params.id));
             for (const account of tenantAccountList(ctx, String(req.params.id))) {
-                try { ctx.provider.stopAccount(account.id, { preserveIntent: true }); } catch { /* Retry during lifecycle sweep. */ }
+                try { await ctx.provider.stopAccount(account.id, { preserveIntent: true }); } catch { /* Retry during lifecycle sweep. */ }
             }
         } else if (previous?.status === 'disabled') {
             ctx.provider.recoverTenantAccounts?.(result.user.id);
@@ -163,7 +163,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
         return res.json({ ok: true, data: { removed } });
     });
 
-    app.delete('/api/admin/tenants/:id', (req: Request, res: Response) => {
+    app.delete('/api/admin/tenants/:id', async (req: Request, res: Response) => {
         const target = userStore.getUserById(req.params.id);
         if (!target || target.role !== 'tenant') return res.status(404).json({ ok: false, error: '租户不存在' });
         const confirm = String((req.body || {}).confirm || req.query.confirm || '');
@@ -177,7 +177,7 @@ function mountTenantRoutes(app: Application, ctx: AdminContext): void {
             kickSockets(ctx, target.id);
             const accounts = tenantAccountList(ctx, target.id);
             for (const account of accounts) {
-                ctx.provider.stopAccount(account.id);
+                await ctx.provider.stopAccount(account.id);
                 ctx.provider.clearLogs?.(account.id);
                 ctx.provider.clearAccountLogs?.(account.id);
                 store.deleteAccount(account.id);

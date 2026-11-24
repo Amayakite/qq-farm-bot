@@ -18,9 +18,9 @@ interface DataProviderOptions {
     broadcastConfigToWorkers: (accountId?: string) => void;
     buildConfigSnapshotForAccount: (accountId: string) => any;
     broadcastGameConfigReload?: () => void;
-    startWorker: (account: any) => boolean;
-    stopWorker: (accountId: string) => void;
-    restartWorker: (account: any) => void;
+    startWorker: (account: any) => boolean | Promise<boolean>;
+    stopWorker: (account: any) => void | Promise<void>;
+    restartWorker: (account: any) => void | Promise<void>;
     canRunAccount?: (account: any) => boolean;
     isRecoveryQueued?: (id: string) => boolean;
     cancelRecovery?: (id: string) => void;
@@ -204,8 +204,8 @@ function createDataProvider(options: DataProviderOptions) {
         clearIllustratedNew: (accountRef: string, fruitIds: number[]) => callWorkerApi(resolveAccountRefId(accountRef), 'clearIllustratedNew', fruitIds),
         getSolarCalendar: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getSolarCalendar'),
         operateSolarCalendar: (accountRef: string, action: string, input: any) => callWorkerApi(resolveAccountRefId(accountRef), 'operateSolarCalendar', action, input),
-        getFriends: (accountRef: string, forceSync = false) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriends', forceSync, true),
-        getFriendsCache: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendsCache'),
+        getFriends: (accountRef: string, forceSync = false, withStatus = false) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriends', forceSync, true, withStatus),
+        getFriendsCache: (accountRef: string, withStatus = false) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendsCache', withStatus),
         clearFriendsCache: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'clearFriendsCache'),
         getInteractRecords: (accountRef: string) => callWorkerApi(resolveAccountRefId(accountRef), 'getInteractRecords'),
         getFriendLands: (accountRef: string, gid: number) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendLands', gid, true),
@@ -505,28 +505,27 @@ function createDataProvider(options: DataProviderOptions) {
             const account = store.setAccountRunState(acc.id, { runEnabled: true });
             cancelRecovery?.(acc.id);
             if (worker?.stopping) {
-                restartWorker(account);
-                return true;
+                return Promise.resolve(restartWorker(account)).then(() => true);
             }
             return !!worker || startWorker(account);
         },
 
-        stopAccount: (accountRef: string, options: { preserveIntent?: boolean } = {}) => {
+        stopAccount: async (accountRef: string, options: { preserveIntent?: boolean } = {}) => {
             const acc = findAccountByAnyRef(accountRef);
             if (!acc) return false;
             if (!options.preserveIntent) store.setAccountRunState(acc.id, { runEnabled: false });
             cancelRecovery?.(acc.id);
-            stopWorker(acc.id);
+            await stopWorker(acc);
             onRunStateChanged?.(acc.id);
             return true;
         },
 
-        restartAccount: (accountRef: string) => {
+        restartAccount: async (accountRef: string) => {
             const acc = findAccountByAnyRef(accountRef);
             if (!acc) return false;
             ensureCanRequestStart(acc);
             cancelRecovery?.(acc.id);
-            restartWorker(store.setAccountRunState(acc.id, { runEnabled: true }));
+            await restartWorker(store.setAccountRunState(acc.id, { runEnabled: true }));
             onRunStateChanged?.(acc.id);
             return true;
         },

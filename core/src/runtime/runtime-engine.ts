@@ -13,6 +13,8 @@ const { createReloginReminderService } = require('./relogin-reminder');
 const { createRuntimeState } = require('./runtime-state');
 const { createWorkerManager } = require('./worker-manager');
 
+const { listHostedSessions, findAccountSession } = require('../session/ipc');
+
 const OPERATION_KEYS = ['harvest', 'farming', 'fertilize', 'plant', 'steal', 'helpFarming', 'taskClaim', 'sell', 'upgrade'];
 
 interface RuntimeEngineOptions {
@@ -72,7 +74,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         sendConfiguredPush,
     } = reloginReminder;
 
-    const { startWorker, stopWorker, restartWorker, callWorkerApi } = createWorkerManager({
+    const { startWorker, stopWorker, restartWorker, callWorkerApi, startAccountWorker, stopAccountWorker, detachAllWorkers } = createWorkerManager({
         fork,
         WorkerThread: Worker,
         runtimeMode,
@@ -85,9 +87,10 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         addAccountLog,
         normalizeStatusForPanel,
         buildConfigSnapshotForAccount,
-        canStartAccount: (account: Account) => {
+        canStartAccount: (account: Account, sessionId?: string) => {
             const saved = store.getAccountById(account.id);
-            return !!saved && saved.code === account.code && shouldRestore(saved);
+            return !!saved && saved.code === account.code && saved.createdAt === account.createdAt
+                && (sessionId ? saved.runEnabled && canRunAccounts(saved.ownerId) && !requiresNewCode(saved.lastRunIssue) : shouldRestore(saved));
         },
         // Make the one-time Code unavailable before it can reach the worker.
         claimLoginCode: (account: Account) => store.setAccountRunState(account.id, { codeConsumed: true }),
@@ -118,8 +121,8 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         broadcastConfigToWorkers,
         buildConfigSnapshotForAccount,
         broadcastGameConfigReload,
-        startWorker,
-        stopWorker,
+        startWorker: startAccountWorker,
+        stopWorker: stopAccountWorker,
         restartWorker,
         canRunAccount: (account: Account) => canRunAccounts(account.ownerId),
         isRecoveryQueued: (id: string) => recoveryQueue.has(id),
@@ -232,6 +235,18 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
             startAdminServer(dataProvider);
         }
 
+        if (processRef.env.FARM_SESSION_SOCKET) {
+            const sessions = await listHostedSessions();
+            for (const account of store.getAccounts().accounts) {
+                const session = findAccountSession(sessions, account);
+                if (!session) continue;
+                if (account.runEnabled && canRunAccounts(account.ownerId) && !requiresNewCode(account.lastRunIssue)) {
+                    startWorker(account, session.sessionId);
+                } else {
+                    await stopAccountWorker(account);
+                }
+            }
+        }
         if (shouldAutoStartAccounts) {
             queueAccountsForRecovery();
         }
@@ -254,6 +269,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         start,
         startAllAccounts: queueAccountsForRecovery,
         stopAllAccounts,
+        detachAllWorkers,
         broadcastConfigToWorkers,
         broadcastGameConfigReload,
         startWorker,

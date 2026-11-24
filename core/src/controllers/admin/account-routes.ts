@@ -1,6 +1,8 @@
 import type { Application, Request, Response } from 'express';
+import type { OfflineReminderChannel } from '../../types/config';
 import type { AdminContext } from './context';
 import { requiresNewCode } from '../../types/account';
+import { normalizePushChannel, readPushChannels, singlePushChannel } from '../../config/push-channels';
 export {};
 
 /**
@@ -8,6 +10,7 @@ export {};
  */
 
 const store = require('../../models/store');
+const { pushChannelError, sendPushChannels } = require('../../services/push');
 const { addOrUpdateAccount, deleteAccount } = store;
 const userStore = require('../../models/user-store');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
@@ -42,9 +45,9 @@ export function persistAndLogAccount(ctx: AdminContext, payload: any, options: {
     return { data, accountId };
 }
 
-export function activateSavedAccount(ctx: AdminContext, accountId: string, updating: boolean, hosting: boolean, name: string) {
-    if (hosting && updating) ctx.provider.restartAccount(accountId);
-    else if (hosting) ctx.provider.startAccount(accountId);
+export async function activateSavedAccount(ctx: AdminContext, accountId: string, updating: boolean, hosting: boolean, name: string) {
+    if (hosting && updating) await ctx.provider.restartAccount(accountId);
+    else if (hosting) await ctx.provider.startAccount(accountId);
     else if (updating) ctx.provider.setRuntimeAccountName?.(accountId, name);
 }
 
@@ -93,7 +96,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.post('/api/accounts', (req: Request, res: Response) => {
+    app.post('/api/accounts', async (req: Request, res: Response) => {
         try {
             const rawBody = (req.body && typeof req.body === 'object') ? req.body : {};
             const requestedName = typeof rawBody.name === 'string' ? rawBody.name.trim() : '';
@@ -143,7 +146,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
 
             const enableHosting = suppliedCode && (!isUpdate || (existing && userStore.canRunAccounts(existing.ownerId)));
             const { data, accountId } = persistAndLogAccount(ctx, payload, { updating: isUpdate, enableHosting, remarkRelogin: isRemarkRelogin });
-            activateSavedAccount(ctx, accountId, isUpdate, enableHosting, payload.name);
+            await activateSavedAccount(ctx, accountId, isUpdate, enableHosting, payload.name);
             res.json({
                 ok: true,
                 data: accountResponse(data, auth),
@@ -153,7 +156,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
-    app.delete('/api/accounts/:id', (req: Request, res: Response) => {
+    app.delete('/api/accounts/:id', async (req: Request, res: Response) => {
         try {
             const auth = (req as any).auth;
             const before = getAccountList(ctx, auth);
@@ -163,7 +166,7 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
                 return res.status(404).json({ ok: false, error: 'Account not found' });
             }
 
-            ctx.provider.stopAccount(resolvedId);
+            await ctx.provider.stopAccount(resolvedId);
             if (typeof ctx.provider.clearLogs === 'function') ctx.provider.clearLogs(resolvedId);
             if (typeof ctx.provider.clearAccountLogs === 'function') ctx.provider.clearAccountLogs(resolvedId);
             const data = deleteAccount(resolvedId);
@@ -295,6 +298,20 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
         }
     });
 
+    function channelListError(entries: unknown): string {
+        if (!Array.isArray(entries)) return '推送渠道列表格式无效';
+        const seen = new Set<string>();
+        for (const raw of entries) {
+            if (!raw || typeof raw !== 'object' || typeof raw.enabled !== 'boolean') return '推送渠道配置格式无效';
+            const entry = normalizePushChannel(raw);
+            if (seen.has(entry.channel)) return '推送渠道重复';
+            seen.add(entry.channel);
+            const error = pushChannelError(entry, entry.enabled);
+            if (error) return error;
+        }
+        return '';
+    }
+
     // API: 全局品牌色（owner 统一调整所有用户的主色）
     app.post('/api/settings/appearance', requireOwner, (req: Request, res: Response) => {
         try {
@@ -321,18 +338,29 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     // API: 保存下线提醒配置
     app.post('/api/settings/offline-reminder', requireOwner, async (req: Request, res: Response) => {
         try {
-            const body = (req.body && typeof req.body === 'object') ? req.body : {};
-            const channel = String(body.channel || '').trim().toLowerCase();
-            if (channel === 'dingtalk') {
-                try {
-                    const { buildDingTalkWebhook } = require('../../services/push');
-                    buildDingTalkWebhook(body.endpoint, body.token, body.secret);
-                } catch (error: any) {
-                    return res.status(400).json({ ok: false, error: error?.message || '钉钉 Webhook 地址格式无效' });
+            const body = req.body || {};
+            if (Object.hasOwn(body, 'notificationTypes')) {
+                const types = body.notificationTypes;
+                if (!types || typeof types !== 'object' || Array.isArray(types) || Object.values(types).some(value => typeof value !== 'boolean')) {
+                    return res.status(400).json({ ok: false, error: '通知类型的开关值无效' });
                 }
             }
-            const data = store.setOfflineReminder ? store.setOfflineReminder(body) : {};
-            res.json({ ok: true, data: data || {} });
+            let error = '';
+            if (Object.hasOwn(body, 'channels')) {
+                error = channelListError(body.channels);
+            } else if (Object.hasOwn(body, 'enabled')) {
+                if (typeof body.enabled !== 'boolean' || !body.channel) {
+                    error = '请指定要修改的渠道和启用状态';
+                } else {
+                    error = pushChannelError(singlePushChannel(store.getOfflineReminder(), body), body.enabled);
+                }
+            } else if (['channel', 'endpoint', 'token', 'secret'].some(key => Object.hasOwn(body, key))) {
+                const saved = store.getOfflineReminder();
+                const entry = singlePushChannel(saved, body);
+                error = pushChannelError(entry, entry.channel !== saved.channel);
+            }
+            if (error) return res.status(400).json({ ok: false, error });
+            res.json({ ok: true, data: store.setOfflineReminder(body) });
         } catch (e: any) {
             handleApiError(res, e);
         }
@@ -341,58 +369,40 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     // API: 测试下线提醒推送（不落盘）
     app.post('/api/settings/offline-reminder/test', requireOwner, async (req: Request, res: Response) => {
         try {
-            const saved = store.getOfflineReminder ? store.getOfflineReminder() : {};
-            const body = (req.body && typeof req.body === 'object') ? req.body : {};
-            const cfg = { ...(saved || {}), ...body };
-
-            const channel = String(cfg.channel || '').trim().toLowerCase();
-            const endpoint = String(cfg.endpoint || '').trim();
-            const token = String(cfg.token || '').trim();
-            const secret = String(cfg.secret || '').trim();
-            const titleBase = String(cfg.title || '账号下线提醒').trim();
-            const msgBase = String(cfg.msg || '账号下线').trim();
-
-            if (!channel) {
-                return res.status(400).json({ ok: false, error: '推送渠道不能为空' });
-            }
-            if (channel === 'webhook' && !endpoint) {
-                return res.status(400).json({ ok: false, error: 'Webhook 渠道需要填写接口地址' });
-            }
-            if (channel === 'dingtalk' && !endpoint && !token) {
-                return res.status(400).json({ ok: false, error: '钉钉渠道需要填写 Webhook 地址' });
-            }
-            if (channel !== 'webhook' && channel !== 'dingtalk' && !token) {
-                return res.status(400).json({ ok: false, error: '当前推送渠道需要填写 Token' });
+            const body = req.body || {};
+            const saved = store.getOfflineReminder();
+            const single = ['channel', 'endpoint', 'token', 'secret'].some(key => Object.hasOwn(body, key));
+            let targets: OfflineReminderChannel[];
+            if (single) {
+                const entry = singlePushChannel(saved, body);
+                const error = pushChannelError(entry, true);
+                if (error) return res.status(400).json({ ok: false, error });
+                targets = [entry];
+            } else {
+                if (Object.hasOwn(body, 'channels')) {
+                    const error = channelListError(body.channels);
+                    if (error) return res.status(400).json({ ok: false, error });
+                }
+                targets = readPushChannels(body.channels ? body : saved).filter(entry => entry.enabled);
+                if (!targets.length) return res.status(400).json({ ok: false, error: '请先配置并启用推送渠道' });
             }
 
-            const now = new Date();
-            const ts = now.toISOString().replace('T', ' ').slice(0, 19);
-            const { sendPushooMessage } = require('../../services/push');
-            const ret = await sendPushooMessage({
-                channel,
-                endpoint,
-                token,
-                secret,
-                title: `${titleBase}（测试）`,
-                content: `${msgBase}\n\n这是一条下线提醒测试消息。\n时间: ${ts}`,
-            });
-
-            if (!ret) {
-                return res.status(400).json({ ok: false, error: '推送失败：无返回结果' });
+            const title = String(body.title ?? saved.title ?? '').trim() || '账号下线提醒';
+            const msg = String(body.msg ?? saved.msg ?? '').trim() || '账号下线';
+            const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+            const results = await sendPushChannels(targets, { title: `${title}（测试）`, content: `${msg}\n\n这是一条通知测试消息。\n时间: ${ts}` });
+            if (single) {
+                const [result] = results;
+                return result.ok
+                    ? res.json({ ok: true, data: result, message: result.msg })
+                    : res.status(400).json({ ok: false, error: result.msg, data: result });
             }
-
-            const isSuccess = ret.ok ||
-                ret.code === 'ok' ||
-                ret.code === '0' ||
-                String(ret.msg || '').includes('成功') ||
-                String(ret.raw?.status || '').toLowerCase() === 'success';
-
-            if (!isSuccess && ret.msg && !String(ret.msg).includes('成功')) {
-                return res.status(400).json({ ok: false, error: ret.msg || '推送失败', data: ret });
-            }
-            return res.json({ ok: true, data: ret, message: ret.msg || '推送成功' });
+            const data = results.map(({ channel, ok, msg }) => ({ channel, ok, msg }));
+            const sent = data.filter(result => result.ok).length;
+            if (!sent) return res.status(400).json({ ok: false, error: data.map(r => `${r.channel}: ${r.msg}`).join('；'), data });
+            return res.json({ ok: true, message: `测试完成，${sent}/${data.length} 个渠道成功`, data });
         } catch (e: any) {
-            return handleApiError(res, e);
+            handleApiError(res, e);
         }
     });
 

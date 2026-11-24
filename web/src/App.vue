@@ -7,20 +7,38 @@ import { NMessageProvider } from 'naive-ui/es/message'
 import { NNotificationProvider } from 'naive-ui/es/notification'
 import { darkTheme } from 'naive-ui/es/themes'
 import { storeToRefs } from 'pinia'
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { RouterView } from 'vue-router'
+import PanelStatusBanner from '@/components/PanelStatusBanner.vue'
 import ToastContainer from '@/components/ToastContainer.vue'
 import { useAppStore } from '@/stores/app'
 import { usePublicConfigStore } from '@/stores/public-config'
+import { useAppUpdateStore } from '@/stores/app-update'
+import { useStatusStore } from '@/stores/status'
 import { createNaiveThemeOverrides } from '@/ui/naive-theme'
 
-const appStore = useAppStore()
-const publicConfig = usePublicConfigStore()
-const { isDark, brandColor } = storeToRefs(appStore)
+const { isDark, brandColor } = storeToRefs(useAppStore())
+const appUpdateStore = useAppUpdateStore()
+const statusStore = useStatusStore()
+const { realtimeReconnecting, realtimeReconnectCount, serverWebBuildId } = storeToRefs(statusStore)
 const themeOverrides = computed(() => createNaiveThemeOverrides(isDark.value, brandColor.value))
 
+watch([realtimeReconnecting, realtimeReconnectCount], ([reconnecting, count]) => {
+  appUpdateStore.syncSocketState(reconnecting, count)
+}, { immediate: true })
+
+watch(serverWebBuildId, (buildId) => {
+  if (buildId)
+    appUpdateStore.observeBuildId(buildId)
+}, { immediate: true })
+
 onMounted(() => {
-  publicConfig.fetchConfig()
+  usePublicConfigStore().fetchConfig()
+  appUpdateStore.startMonitoring()
+})
+
+onBeforeUnmount(() => {
+  appUpdateStore.stopMonitoring()
 })
 </script>
 
@@ -37,6 +55,7 @@ onMounted(() => {
         <NNotificationProvider placement="top-right" :max="4">
           <div class="app-shell h-screen w-screen overflow-hidden">
             <RouterView />
+            <PanelStatusBanner />
             <ToastContainer />
           </div>
         </NNotificationProvider>

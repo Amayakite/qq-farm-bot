@@ -20,6 +20,7 @@ require.cache[networkPath] = {
 require.cache[protoPath] = {
     exports: {
         types: {
+            FertilizeReply: { decode: () => ({ land: [] }) },
             FertilizeRequest: {
                 create: value => value,
                 encode: () => ({ finish: () => Buffer.alloc(0) }),

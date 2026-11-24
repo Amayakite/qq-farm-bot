@@ -49,8 +49,8 @@ export function mountAccountScanRoutes(app: Application, ctx: AdminContext): voi
             const updating = !!account;
             const payload = { name, code, platform: target.platform, ...(updating ? { id: account.id } : { ownerId: target.tenantId }) };
             const { accountId } = persistAndLogAccount(ctx, payload, { updating, enableHosting: true });
-            try { activateSavedAccount(ctx, accountId, updating, true, name); }
-            catch { logger.warn('扫码保存成功，托管启动失败', { accountId }); }
+            void activateSavedAccount(ctx, accountId, updating, true, name)
+                .catch(() => logger.warn('扫码保存成功，托管启动失败', { accountId }));
             return accountId;
         },
         observe: entry => logger.info('扫码任务状态', entry),

@@ -62,7 +62,9 @@ function sweepExpiredTenants(ctx: AdminContext): { stopped: number; kicked: numb
         for (const account of accounts) {
             if (!account.running) continue;
             try {
-                ctx.provider.stopAccount(account.id, { preserveIntent: true });
+                Promise.resolve(ctx.provider.stopAccount(account.id, { preserveIntent: true })).catch((error) => {
+                    tenantLogger.warn('停止到期账号失败', { accountId: account.id, tenantId, error: error.message });
+                });
                 stopped++;
             } catch (error: any) {
                 tenantLogger.warn('停止到期账号失败', {
