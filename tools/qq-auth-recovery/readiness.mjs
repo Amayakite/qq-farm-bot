@@ -89,7 +89,7 @@ export function requestNapcatRecreate(directory) {
     const staging = path.join(directory, id + '.tmp');
     await writeFile(staging, JSON.stringify({ id, at: Date.now() }), { mode: 0o600, flag: 'wx' });
     await rename(staging, path.join(directory, 'request.json'));
-    const deadline = Date.now() + 25_000;
+    const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
       const result = await readFile(path.join(directory, 'response.json'), 'utf8').then(text => JSON.parse(text)).catch(() => null);
       if (result?.id === id) {
@@ -108,6 +108,7 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
   let recoverAfter = 0;
   let recoveryBackoffIndex = 0;
   let recoveryRequest;
+  let resetMsfCache = false;
 
   async function refresh(current) {
     const answer = await call(REFRESH);
@@ -142,12 +143,14 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
     // Some clients do not create a QR until the refresh command runs.
   }
 
-  async function recoverContainer() {
+  async function recoverContainer(repeatedQrTimeout) {
     if (!recreate) return undefined;
     const current = await call(CHECK).catch(() => null);
     if (activeLogin(current)) throw blocked();
     if (!logoutConfirmedByWebUi(current)) return undefined;
     recoveryRequest = randomUUID();
+    resetMsfCache = repeatedQrTimeout && current.loginPhase === 'offline'
+      && current.isOffline === false && !qrFrom(current);
     state = 'recreating';
     report('recreate_started');
     try {
@@ -162,6 +165,7 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
       if (error?.code === 'LOGOUT_REQUIRED') throw error;
     } finally {
       recoveryRequest = undefined;
+      resetMsfCache = false;
     }
   }
 
@@ -181,6 +185,7 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
         qrRetryAfterMs: Math.max(0, retryAfter - currentTime),
         qrRecoveryRetryAfterMs: Math.max(0, recoverAfter - currentTime),
         qrRecoveryRequest: recoveryRequest,
+        qrRecoveryResetMsfCache: resetMsfCache,
       };
     },
     invalidate() { state = 'unknown'; retryAfter = 0; },
@@ -203,9 +208,11 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
         recoveryBackoffIndex = Math.min(recoveryBackoffIndex + 1, RECOVERY_DELAYS_MS.length - 1);
         state = 'recovering';
         report('recovery_started');
+        let repeatedQrTimeout = false;
+        // The restart can close the WebUI connection before its reply arrives.
+        await call(RESTART).catch(() => {});
+        clearCredential();
         try {
-          await call(RESTART);
-          clearCredential();
           await awaitRestart();
           const qr = succeeded(await fresh());
           report('recovery_succeeded');
@@ -213,8 +220,9 @@ export function createQrReadiness({ call, clearCredential, recreate, report = ()
         } catch (error) {
           report('recovery_unavailable');
           if (error?.code === 'LOGOUT_REQUIRED') throw error;
+          repeatedQrTimeout = [failure, error].every(e => /二维码刷新超时/.test(e?.message || ''));
         }
-        const qr = await recoverContainer();
+        const qr = await recoverContainer(repeatedQrTimeout);
         if (qr) return succeeded(qr);
       }
       state = 'unavailable';

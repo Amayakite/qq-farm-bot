@@ -198,6 +198,39 @@ test('fails closed while another login is active or awaiting its confirmation', 
   assert.equal(logoutConfirmedByWebUi({ isLogin: false }), false);
 });
 
+test('grants cache repair only for two QR timeouts and a confirmed offline client with no QR', async () => {
+  const signedOut = { ...offline, isOffline: false };
+  for (const [status, secondError, expected] of [
+    [signedOut, timeout(), true],
+    [offline, timeout(), false],
+    [{ ...signedOut, qrcodeurl: 'old' }, timeout(), false],
+    [{ ...signedOut, loginPhase: 'reconnecting' }, timeout(), false],
+    [signedOut, new Error('Too many requests'), false],
+  ]) {
+    let now = 0;
+    let refreshes = 0;
+    let recovered = false;
+    const reader = createQrReadiness({
+      now: () => now,
+      wait: async ms => { now += ms; },
+      clearCredential() {},
+      async recreate(id) {
+        assert.equal(reader.health().qrRecoveryRequest, id);
+        assert.equal(reader.health().qrRecoveryResetMsfCache, expected);
+        recovered = true;
+      },
+      async call(path) {
+        if (path.endsWith('CheckLoginStatus')) return status;
+        if (path.endsWith('RestartNapCat')) throw new Error('Connection closed during restart');
+        if (recovered) return { qrcodeurl: 'new' };
+        throw ++refreshes === 1 ? timeout() : secondError;
+      },
+    });
+    assert.equal(await reader.open(), 'new');
+    assert.equal(reader.health().qrRecoveryResetMsfCache, false);
+  }
+});
+
 test('does not restart on provider restrictions or return a stale QR after a failed refresh', async () => {
   let requestedGetter = false;
   const reader = createQrReadiness({

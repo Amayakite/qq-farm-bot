@@ -13,6 +13,61 @@ spec.loader.exec_module(worker)
 
 
 class RecoveryTest(unittest.TestCase):
+    def test_offline_repair_rotates_only_the_msf_pair_with_the_client_stopped(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch).resolve()
+            profile = root / 'napcat-state' / 'qq-active'
+            cache = profile / 'global' / 'nt_data' / 'mmkv'
+            cache.mkdir(parents=True)
+            pair = [cache / worker.MSF_CONFIG, cache / (worker.MSF_CONFIG + '.crc')]
+            other = cache / 'mmkv.default'
+            other.write_text('keep')
+            for f in pair:
+                f.write_text(f.name)
+            mount = {'Type': 'bind', 'RW': True, 'Source': str(profile), 'Destination': '/app/.config/QQ'}
+            running = True
+
+            def docker(args, **kwargs):
+                nonlocal running
+                if args[1] == 'inspect':
+                    return worker.subprocess.CompletedProcess(args, 0, 'client-id\n' + json.dumps([mount]))
+                self.assertEqual(args[-1], 'client-id')
+                if args[1] == 'stop':
+                    self.assertTrue(running)
+                    self.assertTrue(all(f.exists() for f in pair))
+                    running = False
+                else:
+                    self.assertEqual(args[1], 'start')
+                    self.assertFalse(running)
+                    running = True
+
+            with patch.object(worker, 'DEPLOY', root / 'auth-deploy'), patch.object(worker.subprocess, 'run', side_effect=docker):
+                self.assertTrue(worker.repair_msf_cache())
+                self.assertTrue(running)
+                for f in pair:
+                    self.assertFalse(f.exists())
+                    self.assertEqual(f.with_name(f.name + '.qq-farm-previous').read_text(), f.name)
+                self.assertEqual(other.read_text(), 'keep')
+                self.assertFalse(worker.repair_msf_cache())
+                for f in pair:
+                    f.write_text('second generation')
+                with patch.object(worker, 'quarantine_cache', side_effect=OSError()):
+                    with self.assertRaises(OSError):
+                        worker.repair_msf_cache()
+                self.assertTrue(running)
+                mount['Source'] = str(root)
+                self.assertFalse(worker.repair_msf_cache())
+
+    def test_nonregular_cache_member_leaves_both_files_untouched(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            cache = Path(scratch).resolve()
+            f = cache / worker.MSF_CONFIG
+            f.write_text('config')
+            f.with_suffix('.crc').symlink_to(f)
+            with self.assertRaises(ValueError):
+                worker.quarantine_cache(cache)
+            self.assertEqual(f.read_text(), 'config')
+
     def test_only_the_active_recovery_lease_can_recreate_the_napcat_container(self):
         with tempfile.TemporaryDirectory() as scratch:
             deploy = Path(scratch)

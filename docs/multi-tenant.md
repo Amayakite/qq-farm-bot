@@ -87,6 +87,7 @@
 - 小程序授权成功、失败或过期后，当前任务持有 QQ 通道直到注销收尾。取消尚未确认的扫码时，服务检查 QQ 当前状态并替换旧码。可在本地把 `QQ_AUTH_TEST_MODULE` 指向已应用补丁且已安装依赖的授权服务 `server.js`，运行 `node --test tools/qq-auth-recovery/*.test.mjs` 验证连续两位用户的交接。
 - QQ 客户端确认退出后，下一轮以实际生成新码验证就绪。取码失败且确认 NapCat 离线时，每轮至多尝试一次 Worker 恢复。仍无法取码时，宿主机的 `qq-farm-qr-recovery.path` 接受当前授权流程验证过的请求，按原镜像重建 NapCat 一次，保留持久化挂载。下一次恢复由新的取码请求触发，间隔依次为 5、15、45 分钟，最长 60 分钟。成功生成新码后重置间隔。授权服务健康接口的 `qrReadiness`、`qrRetryAfterMs` 和 `qrRecoveryRetryAfterMs` 分别记录就绪状态、取码退避和恢复退避。
 - 覆盖文件随部署保留在 `auth-deploy/recovery/current`。维护授权容器时沿用两份 Compose 文件，或重新运行安装脚本。农场容器和持久化目录沿用现有部署流程。
+- 如果 Worker 恢复前后各出现一次“二维码刷新超时”，且 NapCat 明确报告已退出、无二维码，授权服务会在本次恢复请求中允许修复 MSF 连接缓存。宿主机核对请求归属及 QQ 数据挂载后，停下 NapCat，将 `global/nt_data/mmkv/nt_mmkv_msf_united_config` 和对应的 `.crc` 改名留存，再启动客户端并由授权服务验证新码。每个文件在原目录保留最近一次备份，后缀为 `.qq-farm-previous`。可通过 `journalctl -u qq-farm-qr-recovery.service` 查看触发记录。
 
 ### 备份与恢复演练
 
