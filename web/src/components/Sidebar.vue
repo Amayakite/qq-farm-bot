@@ -343,8 +343,17 @@ const navGroups = computed(() => {
       group: item.meta?.group,
     }))
 
-  if (inRanch)
-    return [{ key: 'game', label: '', items }]
+  if (inRanch) {
+    const groups = [{ key: 'game', label: '', items }]
+    if (userStore.isOwner) {
+      groups.push({
+        key: 'admin', label: '管理', items: [{
+          name: 'admin-home', path: '/admin', label: '管理中心', icon: 'i-carbon-dashboard', group: 'admin',
+        }],
+      })
+    }
+    return groups
+  }
 
   if (!userStore.isOwner) {
     const settings = items.filter(item => item.name === 'Settings')
@@ -353,10 +362,15 @@ const navGroups = computed(() => {
   }
 
   const admin = items.filter(item => item.group === 'admin' || item.name === 'Settings')
-  const game = items.filter(item => item.group === 'game')
+  const game = isAdminRoute.value
+    ? [
+        { name: 'dashboard', path: '/', label: '进入农场', icon: 'i-carbon-sprout', group: 'game' },
+        { name: 'ranch-dashboard', path: '/ranch', label: '进入牧场', icon: 'i-carbon-pet-image-o', group: 'game' },
+      ]
+    : items.filter(item => item.group === 'game')
   return [
     { key: 'admin', label: '管理', items: admin },
-    { key: 'game', label: '游戏控制台', items: game },
+    { key: 'game', label: isAdminRoute.value ? '游戏' : '农场', items: game },
   ].filter(group => group.items.length > 0)
 })
 

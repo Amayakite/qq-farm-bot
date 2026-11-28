@@ -2,7 +2,6 @@
 import { computed, onMounted, ref } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
-import { useAppStore } from '@/stores/app'
 import { useToastStore } from '@/stores/toast'
 
 interface TenantSummary {
@@ -16,9 +15,10 @@ interface TenantSummary {
   lastLoginAt?: number | null
 }
 
-const appStore = useAppStore()
 const toast = useToastStore()
 const loading = ref(false)
+const loaded = ref(false)
+const loadError = ref('')
 const tenants = ref<TenantSummary[]>([])
 const stats = ref<any>({})
 const codeStats = ref<any>({})
@@ -43,16 +43,13 @@ const alerts = computed(() => {
     list.push({ key: 'expiring', text: `共 ${expiring.value.length} 个租户即将到期`, tone: 'warning', to: '/admin/tenants?filter=expiring', action: '全部即将到期' })
   if (disabled.value.length)
     list.push({ key: 'disabled', text: `${disabled.value.length} 个租户处于停用状态`, tone: 'info', to: '/admin/tenants?filter=disabled', action: '查看' })
-  if (Number(codeStats.value.unused) > 0)
-    list.push({ key: 'codes', text: `${codeStats.value.unused} 个激活码未使用`, tone: 'info', to: '/admin/tenants?tab=codes', action: '查看' })
   return list
 })
 
 const cards = computed(() => [
-  { label: '租户', value: stats.value.tenantCount || 0, hint: `有效 ${stats.value.activeTenantCount || 0}`, icon: 'i-carbon-user-multiple' },
-  { label: '激活码', value: codeStats.value.total || 0, hint: `未使用 ${codeStats.value.unused || 0}`, icon: 'i-carbon-ticket' },
-  { label: '游戏账号', value: stats.value.accountCount || 0, hint: `运行中 ${stats.value.runningCount || 0}`, icon: 'i-carbon-game-console' },
-  { label: '批次', value: codeStats.value.batchCount || 0, hint: `续费码 ${codeStats.value.renewCodes || 0}`, icon: 'i-carbon-catalog' },
+  { label: '有效用户', value: stats.value.activeTenantCount || 0, hint: `共 ${stats.value.tenantCount || 0} 位用户`, icon: 'i-carbon-user-multiple' },
+  { label: '未使用激活码', value: codeStats.value.unused || 0, hint: `共 ${codeStats.value.total || 0} 个激活码`, icon: 'i-carbon-ticket' },
+  { label: '租户运行中账号', value: stats.value.runningCount || 0, hint: `共 ${stats.value.accountCount || 0} 个账号`, icon: 'i-carbon-sprout' },
 ])
 
 function formatDate(value: number | null | undefined): string {
@@ -80,19 +77,23 @@ function tenantStatus(tenant: TenantSummary): { label: string, className: string
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const { data } = await api.get('/api/admin/overview')
     if (data?.ok) {
       tenants.value = data.data.tenants || []
       stats.value = data.data
       codeStats.value = data.data.codes || {}
+      loaded.value = true
     }
     else {
-      toast.error(getApiErrorMessage(data, '加载失败'))
+      loadError.value = getApiErrorMessage(data, '加载失败')
+      toast.error(loadError.value)
     }
   }
   catch (error: any) {
-    toast.error(getApiErrorMessage(error, '加载失败'))
+    loadError.value = getApiErrorMessage(error, '加载失败')
+    toast.error(loadError.value)
   }
   finally {
     loading.value = false
@@ -103,182 +104,112 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="admin-home space-y-4">
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p class="text-xs text-gray-500 dark:text-gray-400">
-          租户、激活码和服务状态概览。游戏功能放在下方“游戏控制台”中。
-        </p>
-      </div>
-      <div class="flex flex-wrap gap-2">
-        <BaseButton variant="primary" size="sm" to="/admin/tenants?tab=codes&issue=new">
-          <span class="i-carbon-add" />
-          生成激活码
-        </BaseButton>
-        <BaseButton variant="secondary" size="sm" :loading="loading" @click="load">
-          刷新
+  <div class="admin-home space-y-5">
+    <section class="admin-welcome farm-card rounded-2xl p-5 sm:p-7">
+      <div class="flex flex-wrap items-end justify-between gap-5">
+        <div class="max-w-xl">
+          <p class="admin-eyebrow">管理中心</p>
+          <h1 class="mt-2 text-2xl text-gray-900 font-bold dark:text-gray-100 sm:text-3xl">管理用户和托管</h1>
+          <p class="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">创建激活码邀请用户，查看用户状态，也可以进入农场管理游戏账号。</p>
+        </div>
+        <BaseButton variant="primary" to="/admin/tenants?tab=codes&issue=new">
+          <span class="i-carbon-add" /> 生成激活码
         </BaseButton>
       </div>
+    </section>
+
+    <div v-if="loadError" role="alert" class="farm-card flex flex-wrap items-center justify-between gap-3 rounded-xl p-4 text-sm">
+      <span>概览加载失败，{{ loadError }}</span>
+      <BaseButton variant="secondary" size="sm" :loading="loading" @click="load">重试</BaseButton>
     </div>
 
-    <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
-      <div v-for="card in cards" :key="card.label" class="stat-card farm-card rounded-xl p-4">
-        <div class="flex items-start justify-between gap-2">
-          <div>
-            <div class="text-xs text-gray-500 dark:text-gray-400">
-              {{ card.label }}
+    <section aria-labelledby="admin-actions-title">
+      <div class="mb-3 flex items-center justify-between">
+        <h2 id="admin-actions-title" class="text-base font-bold">常用操作</h2>
+        <BaseButton variant="text" size="sm" :loading="loading" @click="load">刷新数据</BaseButton>
+      </div>
+      <div class="grid gap-3 md:grid-cols-3">
+        <RouterLink class="action-card farm-card rounded-xl p-4" to="/admin/tenants?tab=codes">
+          <span class="action-card__icon"><span class="i-carbon-ticket" /></span>
+          <span class="min-w-0 flex-1"><strong>管理激活码</strong><small>生成、复制、停用和查看使用情况</small></span>
+          <span class="i-carbon-arrow-right action-card__arrow" />
+        </RouterLink>
+        <RouterLink class="action-card farm-card rounded-xl p-4" to="/admin/tenants">
+          <span class="action-card__icon"><span class="i-carbon-user-multiple" /></span>
+          <span class="min-w-0 flex-1"><strong>管理用户</strong><small>查看账号、有效期和配额</small></span>
+          <span class="i-carbon-arrow-right action-card__arrow" />
+        </RouterLink>
+        <RouterLink class="action-card farm-card rounded-xl p-4" to="/">
+          <span class="action-card__icon"><span class="i-carbon-sprout" /></span>
+          <span class="min-w-0 flex-1"><strong>进入农场</strong><small>管理游戏账号和查看托管状态</small></span>
+          <span class="i-carbon-arrow-right action-card__arrow" />
+        </RouterLink>
+      </div>
+    </section>
+
+    <section v-if="loaded" aria-labelledby="admin-overview-title">
+      <h2 id="admin-overview-title" class="mb-3 text-base font-bold">运行概览</h2>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div v-for="card in cards" :key="card.label" class="farm-card rounded-xl p-4">
+          <div class="flex items-start justify-between gap-2">
+            <div>
+              <div class="text-xs text-gray-500 dark:text-gray-400">{{ card.label }}</div>
+              <div class="mt-1 text-2xl text-gray-900 font-bold dark:text-gray-100">{{ card.value }}</div>
+              <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ card.hint }}</div>
             </div>
-            <div class="mt-1 text-2xl text-gray-900 font-bold dark:text-gray-100">
-              {{ card.value }}
-            </div>
-            <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-              {{ card.hint }}
-            </div>
+            <span class="stat-card__icon" :class="card.icon" />
           </div>
-          <span class="stat-card__icon" :class="card.icon" />
         </div>
       </div>
-    </div>
+    </section>
 
-    <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+    <div v-if="loaded" class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[0.8fr_1.2fr]">
       <section class="farm-card rounded-xl p-4">
         <div class="flex items-center justify-between gap-2">
-          <h2 class="text-base text-gray-900 font-bold dark:text-gray-100">
-            需要处理
-          </h2>
+          <h2 class="text-base font-bold">需要关注</h2>
           <span class="text-xs text-gray-500">{{ alerts.length }} 项</span>
         </div>
         <div v-if="alerts.length" class="mt-3 space-y-2">
           <div v-for="alert in alerts" :key="alert.key" class="alert-row" :class="`alert-row--${alert.tone}`">
             <span class="alert-row__dot" />
             <span class="min-w-0 flex-1 text-sm">{{ alert.text }}</span>
-            <BaseButton variant="text" size="sm" :to="alert.to">
-              {{ alert.action }}
-            </BaseButton>
+            <BaseButton variant="text" size="sm" :to="alert.to">{{ alert.action }}</BaseButton>
           </div>
         </div>
-        <div v-else class="mt-3 border rounded-lg border-dashed p-6 text-center text-sm text-gray-500 dark:border-gray-700">
-          当前没有需要处理的提醒
-        </div>
+        <p v-else class="mt-4 text-sm text-gray-500">目前没有到期或停用提醒</p>
       </section>
 
-      <section class="farm-card rounded-xl p-4">
-        <div class="flex items-center justify-between gap-2">
-          <h2 class="text-base text-gray-900 font-bold dark:text-gray-100">
-            快捷操作
-          </h2>
+      <section class="overflow-hidden farm-card rounded-xl">
+        <div class="flex items-center justify-between gap-2 border-b border-gray-200/60 px-4 py-3 dark:border-gray-700/60">
+          <h2 class="text-base font-bold">最近用户</h2>
+          <BaseButton variant="text" size="sm" to="/admin/tenants">查看全部</BaseButton>
         </div>
-        <div class="grid grid-cols-2 mt-3 gap-2">
-          <BaseButton variant="secondary" size="sm" to="/admin/tenants">
-            用户列表
-          </BaseButton>
-          <BaseButton variant="secondary" size="sm" to="/admin/appearance">
-            外观设置
-          </BaseButton>
-          <BaseButton variant="secondary" size="sm" to="/settings">
-            系统设置
-          </BaseButton>
-          <BaseButton variant="secondary" size="sm" to="/admin/tenants?tab=codes">
-            激活码管理
-          </BaseButton>
-          <BaseButton variant="secondary" size="sm" to="/admin/tenants?tab=audit">
-            管理员操作记录
-          </BaseButton>
-        </div>
-        <div class="mt-4 flex items-center gap-3 rounded-lg p-3" style="background: var(--ui-surface-soft);">
-          <span class="brand-dot" :style="{ background: appStore.brandColor }" />
-          <div class="min-w-0 flex-1">
-            <div class="text-xs text-gray-500">
-              当前品牌色
-            </div>
-            <div class="text-sm font-medium">
-              {{ appStore.brandColor }}
-            </div>
-          </div>
-          <BaseButton variant="text" size="sm" to="/admin/appearance">
-            调整
-          </BaseButton>
+        <div class="overflow-x-auto">
+          <table class="admin-table">
+            <thead><tr><th>用户名</th><th>状态</th><th>有效期</th><th>账号</th><th>最近登录</th></tr></thead>
+            <tbody>
+              <tr v-for="tenant in tenants.slice(0, 8)" :key="tenant.id">
+                <td class="font-medium">
+                  <RouterLink class="text-[var(--ui-primary)]" :to="{ path: '/admin/tenants', query: { manage: tenant.id } }">{{ tenant.username }}</RouterLink>
+                </td>
+                <td><span class="status-pill" :class="tenantStatus(tenant).className">{{ tenantStatus(tenant).label }}</span></td>
+                <td class="whitespace-nowrap text-xs">{{ formatDate(tenant.expiresAt) }}</td>
+                <td class="whitespace-nowrap text-xs">{{ tenant.accountCount }} / {{ tenant.maxAccounts }}</td>
+                <td class="whitespace-nowrap text-xs">{{ tenant.lastLoginAt ? formatDate(tenant.lastLoginAt) : '从未登录' }}</td>
+              </tr>
+              <tr v-if="!tenants.length"><td colspan="5" class="py-8 text-center text-sm text-gray-500">暂无用户，生成激活码后即可邀请用户。</td></tr>
+            </tbody>
+          </table>
         </div>
       </section>
     </div>
 
-    <section class="overflow-hidden farm-card rounded-xl">
-      <div class="flex items-center justify-between gap-2 border-b border-gray-200/60 px-4 py-3 dark:border-gray-700/60">
-        <div>
-          <h2 class="text-base text-gray-900 font-bold dark:text-gray-100">
-            租户概览
-          </h2>
-          <p class="mt-0.5 text-xs text-gray-500">
-            按创建时间倒序显示最近租户
-          </p>
-        </div>
-        <BaseButton variant="text" size="sm" to="/admin/tenants">
-          全部用户
-        </BaseButton>
-      </div>
-      <div class="overflow-x-auto">
-        <table class="admin-table">
-          <thead>
-            <tr>
-              <th>用户名</th>
-              <th>状态</th>
-              <th>到期</th>
-              <th>剩余</th>
-              <th>账号</th>
-              <th>最近登录</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="tenant in tenants.slice(0, 8)" :key="tenant.id">
-              <td class="font-medium">
-                <RouterLink class="text-[var(--ui-primary)]" :to="{ path: '/admin/tenants', query: { manage: tenant.id } }">
-                  {{ tenant.username }}
-                </RouterLink>
-              </td>
-              <td><span class="status-pill" :class="tenantStatus(tenant).className">{{ tenantStatus(tenant).label }}</span></td>
-              <td class="whitespace-nowrap text-xs">
-                {{ formatDate(tenant.expiresAt) }}
-              </td>
-              <td class="whitespace-nowrap text-xs">
-                {{ remainingDays(tenant.expiresAt) }}
-              </td>
-              <td class="whitespace-nowrap text-xs">
-                {{ tenant.accountCount }} / {{ tenant.maxAccounts }}
-              </td>
-              <td class="whitespace-nowrap text-xs">
-                {{ formatDate(tenant.lastLoginAt) }}
-              </td>
-            </tr>
-            <tr v-if="!tenants.length">
-              <td colspan="6" class="py-10 text-center text-sm text-gray-500">
-                还没有租户，先生成一个激活码吧。
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="farm-card rounded-xl p-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 class="text-base text-gray-900 font-bold dark:text-gray-100">
-            游戏控制台
-          </h2>
-          <p class="mt-0.5 text-xs text-gray-500">
-            管理员也需要查看游戏时使用，日常管理不需要进入这里。
-          </p>
-        </div>
-        <div class="flex flex-wrap gap-2">
-          <BaseButton variant="secondary" size="sm" to="/">
-            进入农场
-          </BaseButton>
-          <BaseButton variant="secondary" size="sm" to="/ranch">
-            进入牧场
-          </BaseButton>
-        </div>
-      </div>
-    </section>
+    <nav class="flex flex-wrap gap-x-5 gap-y-2 px-1 text-sm" aria-label="其他管理入口">
+      <RouterLink class="admin-secondary-link" to="/ranch">进入牧场</RouterLink>
+      <RouterLink class="admin-secondary-link" to="/admin/tenants?tab=audit">操作记录</RouterLink>
+      <RouterLink class="admin-secondary-link" to="/admin/appearance">外观设置</RouterLink>
+      <RouterLink class="admin-secondary-link" to="/settings?tab=system">系统设置</RouterLink>
+    </nav>
   </div>
 </template>
 
@@ -287,6 +218,55 @@ onMounted(load)
   max-width: 1480px;
   margin-inline: auto;
 }
+
+.admin-welcome {
+  background: linear-gradient(120deg, color-mix(in srgb, var(--ui-primary) 10%, var(--ui-surface)), var(--ui-surface) 72%);
+}
+
+.admin-eyebrow {
+  color: var(--ui-primary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.action-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: inherit;
+  text-decoration: none;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.action-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(40, 55, 45, 0.1);
+}
+
+.action-card:focus-visible, .admin-secondary-link:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 3px;
+}
+
+.action-card__icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: none;
+  place-items: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ui-primary) 12%, transparent);
+  color: var(--ui-primary);
+  font-size: 21px;
+}
+
+.action-card strong, .action-card small { display: block; }
+.action-card strong { font-size: 14px; }
+.action-card small { margin-top: 4px; color: var(--ui-muted); font-size: 12px; line-height: 1.5; }
+.action-card__arrow { color: var(--ui-muted); font-size: 18px; }
+.admin-secondary-link { color: var(--ui-muted); text-decoration: none; }
+.admin-secondary-link:hover { color: var(--ui-primary); }
 
 .stat-card__icon {
   color: var(--ui-primary);
@@ -317,14 +297,6 @@ onMounted(load)
 
 .alert-row--warning .alert-row__dot {
   background: var(--ui-warning);
-}
-
-.brand-dot {
-  width: 26px;
-  height: 26px;
-  flex: none;
-  border-radius: 9px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
 }
 
 .admin-table {
