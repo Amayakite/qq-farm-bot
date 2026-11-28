@@ -187,9 +187,12 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string }, opti
 function deleteAccount(id: unknown): AccountsData {
     const { removeAccountConfig } = require('./account-config');
     const data = getAccounts();
+    const removed = data.accounts.find(a => a.id === String(id));
     data.accounts = data.accounts.filter(a => a.id !== String(id));
     removeAccountConfig(id);
     saveAccounts(data);
+    if (removed?.platform === 'wx') require('../wx-credentials').removeWxCredentials(removed);
+    if (removed) require('../yishu-tickets').removeAccountTickets(removed);
     return data;
 }
 

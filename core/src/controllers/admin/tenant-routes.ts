@@ -6,6 +6,7 @@ const store = require('../../models/store');
 const userStore = require('../../models/user-store');
 const codeStore = require('../../models/activation-code-store');
 const auditStore = require('../../models/admin-audit-store');
+const announcementStore = require('../../models/announcement-store');
 const { CONFIG } = require('../../config/config');
 const { createModuleLogger } = require('../../services/logger');
 const { getAccountList, rawAccountList, handleApiError, requireOwner } = require('./middleware');
@@ -52,6 +53,27 @@ function tenantSummaries(ctx: AdminContext): any[] {
 
 function mountTenantRoutes(app: Application, ctx: AdminContext): void {
     app.use('/api/admin', requireOwner);
+
+    app.get('/api/announcement', (_req: Request, res: Response) => {
+        try {
+            const announcement = announcementStore.getAnnouncement();
+            return res.json({ ok: true, data: announcement.enabled ? announcement : null });
+        } catch (error: any) { return handleApiError(res, error); }
+    });
+    app.get('/api/admin/announcement', (_req: Request, res: Response) => {
+        try { return res.json({ ok: true, data: announcementStore.getAnnouncement() }); }
+        catch (error: any) { return handleApiError(res, error); }
+    });
+    app.put('/api/admin/announcement', (req: Request, res: Response) => {
+        try {
+            const announcement = announcementStore.saveAnnouncement(req.body);
+            recordAudit(req, announcement.enabled ? 'announcement.publish' : 'announcement.hide', {});
+            return res.json({ ok: true, data: announcement });
+        } catch (error: any) {
+            if (error?.code === 'INVALID_ANNOUNCEMENT') return res.status(400).json({ ok: false, error: error.message });
+            return handleApiError(res, error);
+        }
+    });
 
     app.get('/api/admin/audit', (req: Request, res: Response) => {
         try {

@@ -13,6 +13,7 @@ const store = require('../../models/store');
 const { pushChannelError, sendPushChannels } = require('../../services/push');
 const { addOrUpdateAccount, deleteAccount } = store;
 const userStore = require('../../models/user-store');
+const wxCredentials = require('../../models/wx-credentials');
 const { updateRuntimeConfig, getRuntimeConfig, getDefaultSystemConfig, getDevicePresets, getTimeZoneOptions } = require('../../config/config');
 const { emitLogsAfterClear } = require('./socket');
 
@@ -145,6 +146,9 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
             }
 
             const enableHosting = suppliedCode && (!isUpdate || (existing && userStore.canRunAccounts(existing.ownerId)));
+            if (existing?.platform === 'wx' && (suppliedCode || (payload.platform && payload.platform !== 'wx'))) {
+                wxCredentials.removeWxCredentials(existing);
+            }
             const { data, accountId } = persistAndLogAccount(ctx, payload, { updating: isUpdate, enableHosting, remarkRelogin: isRemarkRelogin });
             await activateSavedAccount(ctx, accountId, isUpdate, enableHosting, payload.name);
             res.json({

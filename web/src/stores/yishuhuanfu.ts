@@ -99,7 +99,7 @@ export interface YshfActivity {
   commission: { pending: string, claimable: boolean, flag: string }
   balanceError: string
   balanceStale: boolean
-  daily: { dateKey: string, seedClaimed: boolean, shared: boolean, sharedToday: boolean }
+  daily: { dateKey: string, seedClaimed: boolean, shared: boolean, sharedToday: boolean, shareKeySaved: boolean }
   actions: {
     claimSeed: YshfAction
     sell: YshfAction
@@ -228,6 +228,7 @@ function normalizeActivity(value: unknown): YshfActivity | null {
       seedClaimed: bool(daily.seedClaimed, daily.seed_claimed),
       shared: bool(daily.shared),
       sharedToday: bool(daily.sharedToday, daily.shared_today, daily.quoteGeneratedToday, daily.quote_generated_today),
+      shareKeySaved: daily.shareKeySaved === undefined ? true : bool(daily.shareKeySaved),
     },
     actions: {
       claimSeed: normalizeAction(actions, 'claimSeed'),

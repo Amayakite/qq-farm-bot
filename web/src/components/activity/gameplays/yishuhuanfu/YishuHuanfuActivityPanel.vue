@@ -38,6 +38,7 @@ const ticketInput = ref('')
 const ticketBusy = ref(false)
 const ticketNote = ref('')
 const ticketEntries = ref<Array<{ gid: string; updatedAt: number; expired: boolean }>>([])
+const ownShare = ref<{ gid: string; ticket: string } | null>(null)
 const exchangeCount = ref('1')
 const busy = computed(() => !!store.pending || store.loading || store.loadingCatalog || store.loadingRecords || store.loadingFriends)
 const sweetPotatoCount = computed(() => store.sweetPotatoCount)
@@ -66,6 +67,21 @@ async function loadTickets(id: string) {
   } catch (error: any) {
     if (accountId.value === id) ticketNote.value = getApiErrorMessage(error, '读取票据失败')
   }
+}
+
+async function loadOwnShare(id: string) {
+  try {
+    const { data } = await api.get('/api/activity-center/yishuhuanfu/own-share', { headers: { 'x-account-id': id }, skipErrorToast: true } as any)
+    if (accountId.value === id) ownShare.value = data?.ok ? data.data : null
+  } catch { if (accountId.value === id) ownShare.value = null }
+}
+
+async function copyOwnShare() {
+  if (!ownShare.value) return
+  try {
+    await navigator.clipboard.writeText(`铺主 GID：${ownShare.value.gid}\n分享票据：${ownShare.value.ticket}`)
+    toast.success('已复制铺主 GID 和分享票据')
+  } catch { toast.error('复制失败，请手动选择内容') }
 }
 
 async function saveTicket() {
@@ -131,8 +147,12 @@ async function claimSeed() {
 }
 async function share() {
   if (busy.value) return
+  const supplement = activity.value?.daily.shared === true
   const ok = await store.operate('share', {}, accountId.value)
-  toast[ok ? 'success' : 'error'](ok ? '铺子分享完成' : (store.error || '分享失败'))
+  if (ok) await loadOwnShare(accountId.value)
+  if (!ok) toast.error(store.error || '分享失败')
+  else if (supplement && !ownShare.value) toast.info('本次未取得分享票据，可稍后再试')
+  else toast.success(supplement ? '分享票据已补录' : '铺子分享完成')
 }
 async function sell() {
   if (!canSell.value || busy.value) return
@@ -194,20 +214,28 @@ watch(accountId, (id) => {
   ticketGid.value = ''
   ticketInput.value = ''
   ticketEntries.value = []
+  ownShare.value = null
   ticketNote.value = ''
   if (id) void loadTickets(id)
+  if (id) void loadOwnShare(id)
   if (id) void store.load(id)
   else store.clear()
 }, { immediate: true })
 
 let timer: ReturnType<typeof setInterval> | null = null
 function visibilityChanged() {
-  if (document.visibilityState === 'visible' && accountId.value) void store.load(accountId.value)
+  if (document.visibilityState === 'visible' && accountId.value) {
+    void store.load(accountId.value)
+    void loadOwnShare(accountId.value)
+  }
 }
 onMounted(() => {
   document.addEventListener('visibilitychange', visibilityChanged)
   timer = setInterval(() => {
-    if (document.visibilityState === 'visible' && accountId.value) void store.load(accountId.value)
+    if (document.visibilityState === 'visible' && accountId.value) {
+      void store.load(accountId.value)
+      void loadOwnShare(accountId.value)
+    }
   }, 60_000)
 })
 onUnmounted(() => {
@@ -302,8 +330,8 @@ onUnmounted(() => {
             <BaseButton variant="primary" size="sm" :disabled="activity.daily.seedClaimed || !activity.actions.claimSeed.enabled" :loading="store.pending === 'seed/claim'" @click="claimSeed">
               {{ activity.daily.seedClaimed ? '今日种子已领' : '领取红薯种子' }}
             </BaseButton>
-            <BaseButton variant="secondary" size="sm" :disabled="activity.daily.shared || !activity.actions.share.enabled" :loading="store.pending === 'share'" @click="share">
-              {{ activity.daily.shared ? '今日已分享' : '分享铺子拿暴击' }}
+            <BaseButton variant="secondary" size="sm" :disabled="!activity.actions.share.enabled" :loading="store.pending === 'share'" @click="share">
+              {{ activity.daily.shared ? activity.daily.shareKeySaved ? '今日已分享' : '补领分享票据' : '分享铺子拿暴击' }}
             </BaseButton>
           </div>
         </section>
@@ -416,6 +444,10 @@ onUnmounted(() => {
       <section v-else class="space-y-4">
         <div class="rounded-xl bg-white p-5 shadow-sm dark:bg-gray-800">
           <h2 class="text-base font-semibold">好友分享票据</h2>
+          <div v-if="ownShare" class="mt-3 rounded-lg bg-gray-50 p-3 text-sm dark:bg-gray-900">
+            <div class="flex flex-wrap items-center justify-between gap-2"><strong>我的今日票据</strong><BaseButton size="sm" variant="secondary" @click="copyOwnShare">复制给好友</BaseButton></div>
+            <p class="mt-2 break-all text-xs text-gray-500">铺主 GID：{{ ownShare.gid }}<br>分享票据：{{ ownShare.ticket }}</p>
+          </div>
           <p class="mt-1 text-xs text-gray-500">填写铺主 GID 和好友当天的分享链接或票据，用于当前账号查询和出售；跨日后需重新添加。</p>
           <div class="mt-4 grid gap-3 sm:grid-cols-2">
             <BaseInput v-model="ticketGid" label="铺主 GID" placeholder="输入好友铺主 GID" />

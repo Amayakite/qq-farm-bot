@@ -216,13 +216,19 @@ message YshfShopBrief {
     int64 level = 4;
 }
 
-// 分享回包里的本人铺子信息（cmd 98），field 2 为分享 key。
+// 分享回包里的本人铺子信息（cmd 98）。field 2 是邀请 key，分享票据在 field 5。
+message YshfShareShopRef {
+    int64 activity_id = 1;
+    int64 gid = 2;
+    string share_key = 3;
+}
+
 message YshfSelfShop {
     int64 gid = 1;
-    string share_key = 2;
+    string invite_key = 2;
     string avatar = 3;
     int64 level = 4;
-    bytes field_5 = 5;
+    YshfShareShopRef shop_ref = 5;
 }
 
 // cmd 92 结果：某铺子的今日行情。这是只读查询，不会产生成交。

@@ -188,7 +188,14 @@ async function dispatch(peer: Peer, frame: any) {
     }
     // 管理面板显式停止账号时，工作进程即使已退出也能关闭对应的游戏连接。
     if (op === 'stopAccount') {
-        if (session && session.accountKey === params.accountKey && (!session.owner || session.owner.instanceId === peer.instanceId)) {
+        if (session && session.accountKey === params.accountKey) {
+            if (session.owner && session.owner.instanceId !== peer.instanceId) {
+                const writer = readLockMetadata(path.join(paths.runtimeDir, 'backend-writer.lock'));
+                if (!writer || writer.instanceId !== peer.instanceId) throw new Error('后端实例未持有运行锁');
+                const previousOwner = session.owner;
+                session.unbind(previousOwner);
+                previousOwner.socket.destroy();
+            }
             await session.stop('账号已停止');
         }
         return {};

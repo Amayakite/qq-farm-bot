@@ -555,6 +555,32 @@ test('托管恢复读取备份中的开关，跳过停用租户和已使用的 C
     engine.stopAllAccounts();
 });
 
+test('会话宿主恢复时只接管仍有权限的原账号，并关闭过期或孤儿会话', async () => {
+    const { EventEmitter } = require('node:events');
+    const { accountSessionKey, findAccountSession } = require('../dist/session/ipc');
+    const account = (id, extra = {}) => ({ id, createdAt: 100, ownerId: 'active', platform: 'qq', code: 'fixture', codeConsumed: true, runEnabled: true, lastRunIssue: null, ...extra });
+    const accounts = [account('1'), account('2', { ownerId: 'disabled' }), account('3', { codeConsumed: false }),
+        account('4', { createdAt: 101 }), account('5', { lastRunIssue: { reason: 'kicked', at: 1 } }), account('6', { runEnabled: false })];
+    const sessions = [...accounts.map(a => ({ accountId: a.id, accountKey: accountSessionKey(a.id === '4' ? { ...a, createdAt: 100 } : a), platform: 'qq', sessionId: `session-${a.id}` })),
+        { accountId: 'deleted', accountKey: '["deleted",100]', platform: 'qq', sessionId: 'deleted-session' }];
+    const attached = [];
+    const stopped = [];
+    const store = { getAccounts: () => ({ accounts }), getAccountById: id => accounts.find(a => a.id === id), getSystemConfig: () => null };
+    const { createRuntimeEngine } = load('runtime/runtime-engine.js', {
+        '../models/store': store,
+        '../models/user-store': { canRunAccounts: owner => owner === 'active' },
+        '../session/ipc': { listHostedSessions: async () => sessions, findAccountSession, stopHostedAccount: async (id, key) => stopped.push([id, key]) },
+        './runtime-state': { createRuntimeState: () => ({ workers: {}, globalLogs: [], accountLogs: [], runtimeEvents: new EventEmitter(), log() {}, addAccountLog() {} }) },
+        './relogin-reminder': { createReloginReminderService: () => ({}) },
+        './worker-manager': { createWorkerManager: () => ({ startWorker: (a, id) => { attached.push([a.id, id]); return true; }, stopWorker() {}, stopAccountWorker: async () => {}, detachAllWorkers: async () => {} }) },
+        './data-provider': { createDataProvider: () => ({ getStatus: () => ({}), getAccountHosting: () => ({}) }) },
+    }, { setTimeout: () => ({ unref() {} }) });
+    const engine = createRuntimeEngine({ processRef: { env: { FARM_SESSION_SOCKET: '/fixture' } } });
+    await engine.start({ startAdminServer: false });
+    assert.deepEqual(attached, [['1', 'session-1']]);
+    assert.deepEqual(stopped.map(item => item[0]), ['2', '3', '4', '5', '6', 'deleted']);
+});
+
 test('登录失败的锁定在进程重启后保留，且按客户端来源隔离', () => {
     const dir = tempDir();
     const users = loadUserStore(dir);

@@ -12,8 +12,10 @@ const { createDataProvider } = require('./data-provider');
 const { createReloginReminderService } = require('./relogin-reminder');
 const { createRuntimeState } = require('./runtime-state');
 const { createWorkerManager } = require('./worker-manager');
+const { createWxCredentialRecovery } = require('./wx-credential-recovery');
+const wxCredentials = require('../models/wx-credentials');
 
-const { listHostedSessions, findAccountSession } = require('../session/ipc');
+const { listHostedSessions, findAccountSession, stopHostedAccount } = require('../session/ipc');
 
 const OPERATION_KEYS = ['harvest', 'farming', 'fertilize', 'plant', 'steal', 'helpFarming', 'taskClaim', 'sell', 'upgrade'];
 
@@ -43,6 +45,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
     const recoveryIntervalMs = Math.max(500, Math.min(60_000, Number(processRef.env.FARM_RESTORE_INTERVAL_MS) || 1500));
     const recoveryQueue = new Set<string>();
     let recoveryTimer: NodeJS.Timeout | undefined;
+    let wxRecovery: any;
 
     const runtimeState = createRuntimeState({
         store,
@@ -106,6 +109,11 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
             if (onLog) onLog(entry, accountId, accountName);
         },
     });
+    wxRecovery = createWxCredentialRecovery({
+        store, credentials: wxCredentials, canRun: canRunAccounts,
+        startWorker, isRunning: (id: string) => !!workers[id] && !workers[id].stopping,
+        log, onStateChanged: (id: string) => publishAccountStatus(id),
+    });
     const dataProvider = createDataProvider({
         workers,
         globalLogs: GLOBAL_LOGS,
@@ -125,7 +133,10 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         stopWorker: stopAccountWorker,
         restartWorker,
         canRunAccount: (account: Account) => canRunAccounts(account.ownerId),
-        isRecoveryQueued: (id: string) => recoveryQueue.has(id),
+        isRecoveryQueued: (id: string) => recoveryQueue.has(id) || wxRecovery.isPending(id),
+        hasWxCredentials: (account: Account) => wxRecovery.hasCredentials(account),
+        recoverWxAccount: (id: string) => wxRecovery.recoverNow(id),
+        stopWxRecovery: (id: string) => wxRecovery.stop(id),
         cancelRecovery: (id: string) => recoveryQueue.delete(id),
         recoverTenantAccounts: queueAccountsForRecovery,
         onRunStateChanged: publishAccountStatus,
@@ -178,6 +189,9 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         } catch (error: any) {
             log('错误', '保存托管状态失败', { accountId: id, reason: error?.message });
         }
+        const account = store.getAccountById(id);
+        if (reason) wxRecovery?.onDisconnected(account);
+        else wxRecovery?.adopt(account);
         if (reason) publishAccountStatus(id);
     }
 
@@ -211,6 +225,9 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
             const accounts: Account[] = ownerId ? store.getAccountsByOwner(ownerId) : store.getAccounts().accounts;
             for (const account of accounts) {
                 const worker = workers[account.id];
+                if (account.platform === 'wx' && account.runEnabled && canRunAccounts(account.ownerId)) {
+                    wxRecovery.adopt(account, !worker && (account.codeConsumed || !account.code || requiresNewCode(account.lastRunIssue)));
+                }
                 if (!shouldRestore(account) || (worker && !worker.stopping) || recoveryQueue.has(account.id)) continue;
                 recoveryQueue.add(account.id);
                 publishAccountStatus(account.id);
@@ -236,14 +253,25 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         }
 
         if (processRef.env.FARM_SESSION_SOCKET) {
-            const sessions = await listHostedSessions();
-            for (const account of store.getAccounts().accounts) {
-                const session = findAccountSession(sessions, account);
-                if (!session) continue;
-                if (account.runEnabled && canRunAccounts(account.ownerId) && !requiresNewCode(account.lastRunIssue)) {
-                    startWorker(account, session.sessionId);
+            let sessions: any[] | undefined;
+            for (let attempt = 0; attempt < 20; attempt++) {
+                try { sessions = await listHostedSessions(); break; }
+                catch (error) {
+                    if (attempt === 19) throw error;
+                    if (attempt === 0) log('系统', '等待会话宿主启动');
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+            const accounts: Account[] = store.getAccounts().accounts;
+            for (const session of sessions || []) {
+                const account = accounts.find(candidate => findAccountSession([session], candidate));
+                // A missing, recreated, disabled or re-authorized account must never
+                // inherit an old live connection after the backend comes back.
+                if (!account || !account.runEnabled || !account.codeConsumed
+                    || !canRunAccounts(account.ownerId) || requiresNewCode(account.lastRunIssue)) {
+                    await stopHostedAccount(String(session.accountId), session.accountKey);
                 } else {
-                    await stopAccountWorker(account);
+                    startWorker(account, session.sessionId);
                 }
             }
         }
@@ -253,6 +281,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
     }
 
     function stopAllAccounts(): void {
+        void wxRecovery.stopAll();
         if (recoveryTimer) clearTimeout(recoveryTimer);
         recoveryTimer = undefined;
         recoveryQueue.clear();
@@ -269,7 +298,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         start,
         startAllAccounts: queueAccountsForRecovery,
         stopAllAccounts,
-        detachAllWorkers,
+        detachAllWorkers: async () => { await Promise.all([wxRecovery.stopAll(), detachAllWorkers()]); },
         broadcastConfigToWorkers,
         broadcastGameConfigReload,
         startWorker,

@@ -72,4 +72,28 @@ function removeTicket(account: any, gidInput: unknown): void {
     writeJsonFileAtomic(fileFor(account), data, 0, 0o600);
 }
 
-module.exports = { normalizeGid, parseTicket, readTickets, listTickets, saveTicket, removeTicket };
+function ownFile(account: any): string {
+    return path.join(getDataDir(), 'yishu-own-share', path.basename(fileFor(account)));
+}
+
+function readOwnShare(account: any) {
+    const data = readJsonFileStrict(ownFile(account), () => null);
+    if (!data) return null;
+    const updatedAt = Number(data.updatedAt) || 0;
+    if (!updatedAt || getSystemDateKey(updatedAt) !== getSystemDateKey()) return null;
+    return { gid: normalizeGid(data.gid), ticket: parseTicket(data.ticket), updatedAt };
+}
+
+function saveOwnShare(account: any, gid: unknown, ticket: unknown): void {
+    const file = ownFile(account);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeJsonFileAtomic(file, { gid: normalizeGid(gid), ticket: parseTicket(ticket), updatedAt: Date.now() }, 0, 0o600);
+}
+
+function removeAccountTickets(account: any): void {
+    for (const file of [fileFor(account), ownFile(account)]) {
+        try { fs.unlinkSync(file); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
+    }
+}
+
+module.exports = { normalizeGid, parseTicket, readTickets, listTickets, saveTicket, removeTicket, readOwnShare, saveOwnShare, removeAccountTickets };

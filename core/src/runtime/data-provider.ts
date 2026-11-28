@@ -23,6 +23,9 @@ interface DataProviderOptions {
     restartWorker: (account: any) => void | Promise<void>;
     canRunAccount?: (account: any) => boolean;
     isRecoveryQueued?: (id: string) => boolean;
+    hasWxCredentials?: (account: any) => boolean;
+    recoverWxAccount?: (id: string) => Promise<boolean>;
+    stopWxRecovery?: (id: string) => void;
     cancelRecovery?: (id: string) => void;
     recoverTenantAccounts?: (ownerId: string) => void;
     onRunStateChanged?: (id: string) => void;
@@ -49,6 +52,9 @@ function createDataProvider(options: DataProviderOptions) {
         restartWorker,
         canRunAccount,
         isRecoveryQueued,
+        hasWxCredentials,
+        recoverWxAccount,
+        stopWxRecovery,
         cancelRecovery,
         recoverTenantAccounts,
         onRunStateChanged,
@@ -79,12 +85,13 @@ function createDataProvider(options: DataProviderOptions) {
         const workerActive = worker && !worker.stopping;
         const issue = account?.lastRunIssue || null;
         const needsCode = account && (!account.code || requiresNewCode(issue) || (account.codeConsumed && !workerActive));
+        const recoveryQueued = !!isRecoveryQueued?.(id);
         const phase = !account || !account.runEnabled ? 'stopped'
             : canRunAccount && !canRunAccount(account) ? 'suspended'
-            : needsCode ? 'relogin_required'
             : workerActive ? (worker.status?.connection?.connected ? 'online' : 'connecting')
-            : isRecoveryQueued?.(id) ? 'queued' : 'offline';
-        return { phase, runEnabled: account?.runEnabled === true, needsCode: !!needsCode, issue };
+            : recoveryQueued ? 'queued'
+            : needsCode ? 'relogin_required' : 'offline';
+        return { phase, runEnabled: account?.runEnabled === true, needsCode: !!needsCode && !recoveryQueued, issue };
     }
 
     function accountPanelView(account: any) {
@@ -520,6 +527,12 @@ function createDataProvider(options: DataProviderOptions) {
             if (!acc) return false;
             const worker = workers[acc.id];
             if (worker && !worker.stopping && acc.runEnabled && (!canRunAccount || canRunAccount(acc))) return true;
+            if ((!acc.code || acc.codeConsumed || requiresNewCode(acc.lastRunIssue)) && hasWxCredentials?.(acc) && recoverWxAccount) {
+                if (canRunAccount && !canRunAccount(acc)) throw Object.assign(new Error('所属租户已停用或到期'), { code: 'tenant_unavailable' });
+                store.setAccountRunState(acc.id, { runEnabled: true });
+                cancelRecovery?.(acc.id);
+                return recoverWxAccount(acc.id).catch(() => { throw Object.assign(new Error('微信授权恢复失败，请重新扫码'), { code: 'relogin_required' }); });
+            }
             ensureCanRequestStart(acc);
             const account = store.setAccountRunState(acc.id, { runEnabled: true });
             cancelRecovery?.(acc.id);
@@ -534,6 +547,7 @@ function createDataProvider(options: DataProviderOptions) {
             if (!acc) return false;
             if (!options.preserveIntent) store.setAccountRunState(acc.id, { runEnabled: false });
             cancelRecovery?.(acc.id);
+            stopWxRecovery?.(acc.id);
             await stopWorker(acc);
             onRunStateChanged?.(acc.id);
             return true;

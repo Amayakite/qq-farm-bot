@@ -6,6 +6,7 @@ const QR_IMAGE_BASE = 'https://open.weixin.qq.com/connect/qrcode/';
 const QR_POLL_URL = 'https://long.open.weixin.qq.com/connect/l/qrconnect';
 const CALLBACK_URL = 'https://yybadaccess.3g.qq.com/pc_yyb/pcyyb_oauth';
 const LOGIN_BUFFER_URL = 'https://yybadaccess.3g.qq.com/pc_yyb_auth/pcyyb_get_wx_login_buffer_auth';
+const REFRESH_TOKEN_URL = 'https://yybadaccess.3g.qq.com/pc_yyb_auth/pcyyb_refresh_token_auth';
 const USER_INFO_URL = 'https://yybadaccess.3g.qq.com/pc_yyb/pcyyb_get_user_info';
 const OAUTH_APP_ID = 'wxd44977328b36e647';
 const USER_AGENT = 'Mozilla/5.0';
@@ -20,6 +21,15 @@ export interface WxLoginSession {
     openid?: string;
     nickname?: string;
     loginBuffer?: string;
+    refreshToken?: string;
+    accessToken?: string;
+}
+
+export interface WxCredentials {
+    openid: string;
+    loginBuffer: string;
+    refreshToken: string;
+    accessToken: string;
 }
 
 interface HttpResult {
@@ -213,6 +223,7 @@ export class WxLoginService {
         const nickname = extractNickname(callback.body);
         const openid = requiredCookie(session.cookies, 'openid');
         const accessToken = requiredCookie(session.cookies, 'accesstoken');
+        const refreshToken = session.cookies.get('refreshtoken') || '';
         const payload = JSON.stringify({ extInfo: { listS: { unionid: { value: [openid] }, user_id: { value: [openid] }, access_token: { value: [accessToken] } }, listI: { user_type: { value: [0] } } } });
         const timestamp = String(Date.now());
         const nonce = String(crypto.randomInt(1000, 10000));
@@ -236,6 +247,8 @@ export class WxLoginService {
         session.openid = openid;
         session.nickname = userInfoNickname || nickname;
         session.loginBuffer = loginBuffer;
+        session.refreshToken = refreshToken;
+        session.accessToken = accessToken;
         return { openid, loginBuffer };
     }
 
@@ -244,11 +257,47 @@ export class WxLoginService {
         return getNativeWxLoginCode(session.loginBuffer, appId);
     }
 
+    /** Renew the rolling OAuth token, persisting it before requesting the next login buffer. */
+    async refreshCredentials(credentials: WxCredentials, onRotated: (value: WxCredentials) => void): Promise<WxCredentials> {
+        if (!credentials.openid || !credentials.refreshToken) throw new Error('微信授权凭据不完整，请重新扫码');
+        const signedPost = async (url: string, payload: string, cookies: Map<string, string>) => {
+            const timestamp = String(Date.now());
+            const nonce = String(crypto.randomInt(1000, 10000));
+            const signature = crypto.createHash('md5').update(`${payload}${timestamp}${LOGIN_BUFFER_ACCESS_KEY}${nonce}`).digest('hex');
+            const response = await request(url, cookies, { method: 'POST', body: payload, headers: {
+                'Content-Type': 'application/json', 'Ual-Access-Businessid': 'pc_yyb_auth',
+                'Ual-Access-Timestamp': timestamp, 'Ual-Access-Nonce': nonce, 'Ual-Access-Signature': signature,
+            } });
+            if (response.status < 200 || response.status >= 300) throw new Error(`微信授权服务请求失败 (HTTP ${response.status})`);
+            const data = JSON.parse(response.body.toString('utf8'));
+            if (data?.code !== 0) throw new Error(`微信授权服务拒绝请求 (code=${Number(data?.code) || 0})`);
+            return data;
+        };
+        const body = JSON.stringify({ userInfo: { openId: credentials.openid, refreshToken: credentials.refreshToken, accessToken: credentials.accessToken, loginType: 'WX' } });
+        const rotated = await signedPost(REFRESH_TOKEN_URL, body, new Map());
+        const info = rotated?.user_info || rotated?.userInfo || {};
+        const returnedOpenid = String(info.openid || info.open_id || info.openId || '');
+        if (returnedOpenid && returnedOpenid !== credentials.openid) throw new Error('微信授权身份不匹配');
+        const accessToken = String(info.access_token || info.accessToken || '');
+        const refreshToken = String(info.refresh_token || info.refreshToken || credentials.refreshToken);
+        if (!accessToken) throw new Error('微信授权服务未返回新凭据');
+        const next = { ...credentials, accessToken, refreshToken };
+        onRotated(next);
+        const cookies = new Map([['openid', credentials.openid], ['accesstoken', accessToken], ['refreshtoken', refreshToken]]);
+        const bufferBody = JSON.stringify({ extInfo: { listS: { unionid: { value: [credentials.openid] }, user_id: { value: [credentials.openid] }, access_token: { value: [accessToken] } }, listI: { user_type: { value: [0] } } } });
+        const response = await signedPost(LOGIN_BUFFER_URL, bufferBody, cookies);
+        const loginBuffer = response?.ext_info?.list_s?.login_buffer?.value?.[0] || response?.extInfo?.listS?.loginBuffer?.value?.[0];
+        if (typeof loginBuffer !== 'string' || !loginBuffer) throw new Error('微信授权服务未返回登录凭据');
+        return { ...next, loginBuffer };
+    }
+
     destroy(session: WxLoginSession): void {
         session.cookies.clear();
         session.oauthCode = undefined;
         session.openid = undefined;
         session.nickname = undefined;
         session.loginBuffer = undefined;
+        session.refreshToken = undefined;
+        session.accessToken = undefined;
     }
 }

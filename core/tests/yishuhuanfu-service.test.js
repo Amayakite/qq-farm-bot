@@ -168,6 +168,8 @@ function createHarness(options = {}) {
             Object.keys(options.shopQuotes || {}).filter(gid => gid !== '1220537209')
                 .map(gid => [gid, { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: built.now * 1000 }]),
         )),
+        getOwnShareTicket: options.getOwnShareTicket || (() => undefined),
+        saveOwnShareTicket: options.saveOwnShareTicket || (() => {}),
     });
     const operateRequest = () => requests.filter(entry => entry.method === 'Operate');
     return { service, requests, built, operateRequest };
@@ -390,13 +392,13 @@ test('yishuhuanfu share sends cmd 98 once per day', async () => {
             yshf_share: {
                 grant: { item_id: '20307', count: '4' },
                 price: '33',
-                shop: { gid: '1220537209', share_key: '42169456c4b948e9a52a383e708ecd31' },
+                shop: { gid: '1220537209', invite_key: '42169456c4b948e9a52a383e708ecd31' },
             },
         }),
     });
     const result = await harness.service.shareYishuHuanfuShop();
     assert.equal(result.count, '4');
-    assert.equal(result.shareKey, '42169456c4b948e9a52a383e708ecd31');
+    assert.equal(result.shareKey, undefined, 'the unrelated invitation key must not be exposed as a share ticket');
 
     const sent = types.YshfShareRequest.decode(harness.operateRequest()[0].body);
     assert.equal(Number(sent.cmd), 98);
@@ -405,6 +407,27 @@ test('yishuhuanfu share sends cmd 98 once per day', async () => {
         () => harness.service.shareYishuHuanfuShop(),
         error => error.code === 'YSHF_SHARE_ALREADY_DONE',
     );
+});
+
+test('already shared shop can recover its own daily ticket without another reward', async () => {
+    let stored = null;
+    const ticket = '12345678-1234-1234-1234-123456789abc';
+    const harness = createHarness({
+        shared: true,
+        getOwnShareTicket: () => stored,
+        saveOwnShareTicket: (gid, value) => { stored = { gid, ticket: value }; },
+        operateReply: cmd => cmd === 98 ? { yshf_share: { shop: { gid: '1220537209', shop_ref: { activity_id: ACTIVITY_ID, gid: '1220537209', share_key: ticket } } } } : {},
+    });
+    const before = await harness.service.getCurrentYishuHuanfuActivity();
+    assert.equal(before.daily.shareKeySaved, false);
+    assert.equal(before.actions.share.enabled, true);
+    const result = await harness.service.shareYishuHuanfuShop({ withSnapshot: false });
+    assert.equal(result.count, '0');
+    assert.deepEqual(stored, { gid: '1220537209', ticket });
+    const after = await harness.service.getCurrentYishuHuanfuActivity();
+    assert.equal(after.daily.shareKeySaved, true);
+    assert.equal(after.actions.share.enabled, false);
+    await assert.rejects(() => harness.service.shareYishuHuanfuShop(), error => error.code === 'YSHF_SHARE_ALREADY_DONE');
 });
 
 test('yishuhuanfu catalog maps ten static tiers and is exchangeable', async () => {
@@ -596,9 +619,10 @@ test('yishuhuanfu sell proceeds when the reply omits can_sell', async () => {
 });
 
 test('yishuhuanfu friend scan tolerates a failing friend and caches the result', async () => {
+    const savedAt = Date.now();
     const harness = createHarness({
         shopQuotes: { 1220537209: { price: '116', quota: '7000' } },
-        getShopTickets: () => ({ 900001: { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: Date.now() } }),
+        getShopTickets: () => ({ 900001: { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: savedAt } }),
         getAllFriends: async () => ({
             game_friends: [{ gid: '900001', name: '离线好友' }],
         }),

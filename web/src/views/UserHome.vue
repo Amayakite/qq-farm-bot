@@ -7,6 +7,7 @@ import { storeToRefs } from 'pinia'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AccountModal from '@/components/AccountModal.vue'
+import api from '@/api'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import { hostingLabel, useAccountStore } from '@/stores/account'
@@ -30,6 +31,7 @@ const { lands, summary } = storeToRefs(farmStore)
 const { state: ranchState, loading: ranchLoading } = storeToRefs(ranchStore)
 
 const showAccountModal = ref(false)
+const announcement = ref<{ content: string, updatedAt: number } | null>(null)
 const editingAccount = ref<Account | null>(null)
 const welcomeVisible = ref(false)
 const storageKey = (name: string) => `${name}:${userStore.userInfo?.id || 'guest'}`
@@ -352,11 +354,18 @@ watch(currentAccountConnected, (connected) => {
 onMounted(() => {
   if (userStore.isTenant && localStorage.getItem(storageKey('welcome_v1_done')) !== '1')
     welcomeVisible.value = true
+  void api.get('/api/announcement', { skipErrorToast: true } as any)
+    .then(({ data }) => { if (data?.ok && data.data?.content) announcement.value = data.data })
+    .catch(() => { announcement.value = null })
 })
 </script>
 
 <template>
   <div class="home-page page-stack flex flex-col gap-4">
+    <section v-if="announcement" class="farm-card rounded-2xl p-4 sm:p-5" aria-label="管理员公告">
+      <div class="flex items-center gap-2 text-sm font-semibold"><span class="i-carbon-notification text-[var(--ui-primary)]" /> 管理员公告</div>
+      <p class="mt-2 whitespace-pre-wrap break-words text-sm text-gray-600 leading-6 dark:text-gray-300">{{ announcement.content }}</p>
+    </section>
     <section class="hero-card farm-card rounded-2xl p-5 sm:p-6">
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -543,7 +552,7 @@ onMounted(() => {
             </BaseButton>
           </div>
           <p v-if="lastIssue || needsCode" class="mt-3 border rounded-lg px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
-            {{ lastIssue ? issueLabels[lastIssue.reason] : '当前没有可用的登录 Code，请重新扫码或输入新的 Code。' }}
+            {{ currentPhase === 'queued' ? '正在尝试恢复托管，请稍候。' : lastIssue ? issueLabels[lastIssue.reason] : '当前没有可用的登录 Code，请重新扫码或输入新的 Code。' }}
             <span v-if="needsCode && (lastIssue?.reason === 'disconnected' || lastIssue?.reason === 'worker_failed')"> 请更新登录 Code 后重试。</span>
             <time v-if="lastIssue" class="block pt-1 text-gray-500">{{ formatTime(lastIssue.at) }}</time>
           </p>

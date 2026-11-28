@@ -10,6 +10,7 @@ const { isOwner, resolveAuthContext } = require('./middleware');
 const { hasLegacyWxTask } = require('./wx-login-routes');
 const store = require('../../models/store');
 const users = require('../../models/user-store');
+const wxCredentials = require('../../models/wx-credentials');
 const { createModuleLogger } = require('../../services/logger');
 const logger = createModuleLogger('account-scan');
 
@@ -41,6 +42,12 @@ export function mountAccountScanRoutes(app: Application, ctx: AdminContext): voi
         checkTarget,
         save(target, credentials) {
             const account = target.accountId ? store.getAccountById(target.accountId) : null;
+            if (target.platform === 'wx' && account && credentials.wxCredentials) {
+                const existing = wxCredentials.readWxCredentials(account);
+                if (existing && existing.openid !== credentials.wxCredentials.openid) {
+                    throw new ScanProblem(409, 'scan_identity_mismatch', '扫描的微信与原账号不一致，请添加新账号');
+                }
+            }
             const code = credentials.code.trim();
             if (!code || (code === account?.code && (account.codeConsumed || requiresNewCode(account.lastRunIssue)))) {
                 throw new ScanProblem(409, 'relogin_required', '未获得新的登录授权，请重新扫码');
@@ -48,7 +55,14 @@ export function mountAccountScanRoutes(app: Application, ctx: AdminContext): voi
             const name = target.name || account?.name || credentials.nickname?.trim() || (target.platform === 'qq' ? 'QQ 账号' : '微信账号');
             const updating = !!account;
             const payload = { name, code, platform: target.platform, ...(updating ? { id: account.id } : { ownerId: target.tenantId }) };
+            if (target.platform === 'wx' && account) {
+                if (credentials.wxCredentials) wxCredentials.saveWxCredentials(account, credentials.wxCredentials);
+                else wxCredentials.removeWxCredentials(account);
+            }
             const { accountId } = persistAndLogAccount(ctx, payload, { updating, enableHosting: true });
+            if (target.platform === 'wx' && !account && credentials.wxCredentials) {
+                wxCredentials.saveWxCredentials(store.getAccountById(accountId), credentials.wxCredentials);
+            }
             void activateSavedAccount(ctx, accountId, updating, true, name)
                 .catch(() => logger.warn('扫码保存成功，托管启动失败', { accountId }));
             return accountId;

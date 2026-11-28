@@ -307,6 +307,9 @@ onBeforeUnmount(resetScan)
             :disabled="scanInProgress"
             class="farm-input"
           />
+          <p v-if="activeLoginTab === 'wx'" class="text-xs leading-5 text-gray-500 dark:text-gray-400">
+            扫码后如取得可续期授权，服务器会加密保存以恢复托管；授权失效时仍需重新扫码。
+          </p>
           <div v-if="scan || scanStarting || scanError" class="min-h-64 flex flex-col items-center justify-center gap-3">
             <div v-if="scan?.qrImage" class="bg-white p-2">
               <img :src="scan.qrImage" :alt="scanImageLabel" class="h-52 w-52">

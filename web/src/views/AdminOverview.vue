@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import BaseTextarea from '@/components/ui/BaseTextarea.vue'
 import { useToastStore } from '@/stores/toast'
 
 interface TenantSummary {
@@ -22,6 +23,10 @@ const loadError = ref('')
 const tenants = ref<TenantSummary[]>([])
 const stats = ref<any>({})
 const codeStats = ref<any>({})
+const announcement = ref('')
+const announcementEnabled = ref(false)
+const announcementBusy = ref(false)
+const announcementLoaded = ref(false)
 
 const expiring = computed(() => tenants.value
   .filter(tenant => tenant.status === 'active' && tenant.expiresAt && tenant.expiresAt > Date.now() && tenant.expiresAt <= Date.now() + 7 * 86_400_000)
@@ -100,7 +105,30 @@ async function load() {
   }
 }
 
-onMounted(load)
+async function loadAnnouncement() {
+  try {
+    const { data } = await api.get('/api/admin/announcement')
+    if (!data?.ok) throw new Error(getApiErrorMessage(data, '加载公告失败'))
+    announcement.value = data.data.content || ''
+    announcementEnabled.value = data.data.enabled === true
+    announcementLoaded.value = true
+  } catch (error) { toast.error(getApiErrorMessage(error, '加载公告失败')) }
+}
+
+async function saveAnnouncement(enabled: boolean) {
+  if (announcementBusy.value) return
+  announcementBusy.value = true
+  try {
+    const { data } = await api.put('/api/admin/announcement', { content: announcement.value, enabled })
+    if (!data?.ok) throw new Error(getApiErrorMessage(data, '保存公告失败'))
+    announcement.value = data.data.content
+    announcementEnabled.value = data.data.enabled
+    toast.success(enabled ? '公告已发布' : '公告已隐藏')
+  } catch (error) { toast.error(getApiErrorMessage(error, '保存公告失败')) }
+  finally { announcementBusy.value = false }
+}
+
+onMounted(() => { void load(); void loadAnnouncement() })
 </script>
 
 <template>
@@ -146,6 +174,16 @@ onMounted(load)
         </RouterLink>
       </div>
     </section>
+
+    <details class="farm-card rounded-xl p-4">
+      <summary class="cursor-pointer text-sm font-semibold">用户公告 <span class="ml-2 text-xs text-gray-500">{{ announcementEnabled ? '已发布' : '未发布' }}</span></summary>
+      <p class="mt-3 text-xs text-gray-500">发布后会显示在用户首页，可用于通知维护或登录变化。</p>
+      <BaseTextarea v-model="announcement" class="mt-3" label="公告内容" :rows="3" :maxlength="2000" placeholder="输入想告诉用户的内容" />
+      <div class="mt-3 flex flex-wrap gap-2">
+        <BaseButton variant="primary" size="sm" :loading="announcementBusy" :disabled="!announcementLoaded || !announcement.trim()" @click="saveAnnouncement(true)">发布公告</BaseButton>
+        <BaseButton variant="secondary" size="sm" :disabled="!announcementLoaded || !announcementEnabled || announcementBusy" @click="saveAnnouncement(false)">隐藏公告</BaseButton>
+      </div>
+    </details>
 
     <section v-if="loaded" aria-labelledby="admin-overview-title">
       <h2 id="admin-overview-title" class="mb-3 text-base font-bold">运行概览</h2>

@@ -125,6 +125,7 @@ function createYishuAutomation(deps: {
     const skipLoggedOn = new Map<string, string>();
     // 比价结果按「好友数上限 + 配置间隔」复用，避免每轮都把好友扫一遍。
     let scanCache: { at: number; dateKey: string; ticketRevision: string; limit: number; shops: any[] } | null = null;
+    let shareSupplementAttemptDate = '';
 
     function todayKey(): string {
         return new Date((getServerTimeSec() + 8 * 3600) * 1000).toISOString().slice(0, 10);
@@ -332,10 +333,12 @@ function createYishuAutomation(deps: {
         }
 
         if (shareEnabled) {
-            if (snapshot.daily?.shared) {
+            const supplement = snapshot.daily?.shared && snapshot.daily?.shareKeySaved === false;
+            if (snapshot.daily?.shared && (!supplement || shareSupplementAttemptDate === todayKey())) {
                 skip('share', '今日已经分享过铺子，暴击涨价每日只触发一次');
             }
             else {
+                if (supplement) shareSupplementAttemptDate = todayKey();
                 await spacing();
                 try {
                     const result = await shareShop({ withSnapshot: false });

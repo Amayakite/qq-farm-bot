@@ -10,6 +10,7 @@ services:
     image: qq-farm-bot:latest
     container_name: qq-farm-bot
     restart: unless-stopped
+    stop_grace_period: 45s
     ports:
       - "${PORT:-3007}:3007"
     depends_on:

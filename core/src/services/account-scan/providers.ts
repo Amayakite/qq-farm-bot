@@ -47,7 +47,10 @@ export async function openScanSession(platform: ScanPlatform): Promise<ScanSessi
         async authorize() {
             await wxLogin.confirm(session);
             const code = await wxLogin.issueCode(session, WX_APP_ID);
-            return { code, nickname: session.nickname };
+            const wxCredentials = session.openid && session.loginBuffer && session.refreshToken && session.accessToken
+                ? { openid: session.openid, loginBuffer: session.loginBuffer, refreshToken: session.refreshToken, accessToken: session.accessToken }
+                : undefined;
+            return { code, nickname: session.nickname, wxCredentials };
         },
         async release() {
             wxLogin.destroy(session);

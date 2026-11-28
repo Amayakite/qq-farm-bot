@@ -168,7 +168,7 @@ test('yishuhuanfu operate replies decode the verified result slots', async () =>
     assert.equal(int64(share.yshf_share.grant.item_id), 20307);
     assert.equal(int64(share.yshf_share.grant.count), 4);
     assert.equal(int64(share.yshf_share.price), 33);
-    assert.equal(share.yshf_share.shop.share_key, '42169456c4b948e9a52a383e708ecd31');
+    assert.equal(share.yshf_share.shop.invite_key, '42169456c4b948e9a52a383e708ecd31');
 });
 
 test('yishuhuanfu catalog decodes all ten price tiers', async () => {

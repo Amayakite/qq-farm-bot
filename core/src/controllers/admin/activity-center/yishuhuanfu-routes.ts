@@ -5,6 +5,9 @@ const accountStore = require('../../../models/store');
 const tickets = require('../../../models/yishu-tickets');
 
 export function mountYishuHuanfuActivityRoutes({ app, ctx, withAccount, mountGet }: ActivityRouteContext): void {
+    app.get('/api/activity-center/yishuhuanfu/own-share', withAccount(async (accountId: string) => (
+        tickets.readOwnShare(accountStore.getAccountById(accountId))
+    )));
     app.get('/api/activity-center/yishuhuanfu/tickets', withAccount(async (accountId: string) => (
         tickets.listTickets(accountStore.getAccountById(accountId))
     )));

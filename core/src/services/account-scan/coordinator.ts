@@ -9,8 +9,14 @@ export interface ScanSession {
     qrImage: string;
     expiresAt: number;
     poll(signal: AbortSignal): Promise<{ status: ProviderStatus; qrImage?: string }>;
-    authorize(): Promise<{ code: string; nickname?: string }>;
+    authorize(): Promise<ScanCredentials>;
     release(): Promise<void>;
+}
+
+export interface ScanCredentials {
+    code: string;
+    nickname?: string;
+    wxCredentials?: { openid: string; loginBuffer: string; refreshToken: string; accessToken: string };
 }
 
 export interface ScanTarget {
@@ -50,7 +56,7 @@ interface ScanTask {
 interface CoordinatorOptions {
     open: (platform: ScanPlatform) => Promise<ScanSession>;
     checkTarget: (target: ScanTarget) => void;
-    save: (target: ScanTarget, result: { code: string; nickname?: string }) => string;
+    save: (target: ScanTarget, result: ScanCredentials) => string;
     observe?: (entry: { taskId: string; tenantId: string; platform: ScanPlatform; stage: ScanStatus; next: ScanStatus; durationMs: number; errorType?: string }) => void;
     now?: () => number;
 }

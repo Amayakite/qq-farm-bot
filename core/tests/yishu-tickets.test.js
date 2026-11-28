@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { readTickets, listTickets, saveTicket, removeTicket, parseTicket } = require('../dist/models/yishu-tickets');
+const { readTickets, listTickets, saveTicket, removeTicket, parseTicket, saveOwnShare, readOwnShare, removeAccountTickets } = require('../dist/models/yishu-tickets');
 
 test('share tickets are account and tenant isolated and survive restart-safe reads', (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'farm-tickets-'));
@@ -20,6 +20,10 @@ test('share tickets are account and tenant isolated and survive restart-safe rea
     const ticket = '12345678-1234-1234-1234-123456789abc';
     saveTicket(first, '9001', 'https://example.com/share?ticket=' + ticket);
     assert.equal(readTickets(first)['9001'].ticket, ticket);
+    saveOwnShare(first, '9001', ticket);
+    assert.equal(readOwnShare(first).ticket, ticket);
+    assert.equal(readOwnShare(otherTenant), null);
+    assert.equal(readOwnShare(recreated), null);
     assert.deepEqual(readTickets(otherTenant), {});
     assert.deepEqual(readTickets(recreated), {});
     assert.deepEqual(Object.keys(listTickets(first)[0]).sort(), ['expired', 'gid', 'updatedAt']);
@@ -37,4 +41,6 @@ test('share tickets are account and tenant isolated and survive restart-safe rea
     assert.equal(listTickets(first)[0].expired, true);
     removeTicket(first, '9001');
     assert.deepEqual(readTickets(first), {});
+    removeAccountTickets(first);
+    assert.equal(readOwnShare(first), null);
 });

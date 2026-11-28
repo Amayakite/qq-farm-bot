@@ -111,6 +111,8 @@ function createYishuHuanfuActivityService(deps: any) {
         getActivityCenterSnapshot,
         getUserState,
         getShopTickets: getShopTicketsDep,
+        getOwnShareTicket: getOwnShareTicketDep,
+        saveOwnShareTicket: saveOwnShareTicketDep,
     } = deps;
 
     // 状态槽 130 的 4 号子槽只保留最近一次动作，不能用它判断“今天是否已领”，
@@ -136,6 +138,26 @@ function createYishuHuanfuActivityService(deps: any) {
     function ownGid(): string {
         const gid = int64String(getUserState()?.gid);
         return gid === '0' ? '' : gid;
+    }
+
+    function ownShareTicket(): any | null | undefined {
+        if (typeof getOwnShareTicketDep === 'function') return getOwnShareTicketDep();
+        try {
+            const { workerData } = require('node:worker_threads');
+            const store = require('../../models/store');
+            const account = store.getAccountById(String(workerData?.accountId || process.env.FARM_ACCOUNT_ID || ''));
+            if (!account) return undefined;
+            return require('../../models/yishu-tickets').readOwnShare(account);
+        } catch { return undefined; }
+    }
+
+    function saveOwnShareTicket(gid: string, ticket: string): void {
+        if (typeof saveOwnShareTicketDep === 'function') { saveOwnShareTicketDep(gid, ticket); return; }
+        const { workerData } = require('node:worker_threads');
+        const store = require('../../models/store');
+        const account = store.getAccountById(String(workerData?.accountId || process.env.FARM_ACCOUNT_ID || ''));
+        if (!account) throw new Error('账号归属不可用');
+        require('../../models/yishu-tickets').saveOwnShare(account, gid, ticket);
     }
 
     async function queryYshfGroupReply(): Promise<any> {
@@ -263,6 +285,9 @@ function createYishuHuanfuActivityService(deps: any) {
         const quoteReady = basePrice !== '0';
         const hasSweetPotato = balances === null || BigInt(sweetPotatoBalance || '0') > 0n;
         const gid = ownGid();
+        const ownShare = ownShareTicket();
+        // On storage failure do not repeatedly trigger the share action.
+        const shareKeySaved = ownShare === undefined || (!!ownShare && ownShare.gid === gid);
         const catalogLoaded = catalog !== null;
         // 可兑性只看活动期：目录/价格/余额都是前端与下单前的实时校验，
         // 拿 catalogLoaded 当开关会让快照刷新把按钮短暂打回不可兑。
@@ -326,6 +351,7 @@ function createYishuHuanfuActivityService(deps: any) {
                 shared,
                 // 130.2.3 是分享时间戳，落在今天说明今天触发过分享暴击。
                 sharedToday,
+                shareKeySaved,
             },
             actions: {
                 claimSeed: {
@@ -339,8 +365,8 @@ function createYishuHuanfuActivityService(deps: any) {
                     availabilityKnown: balances !== null,
                 },
                 share: {
-                    enabled: active && !shared,
-                    available: active && !shared,
+                    enabled: active && (!shared || !shareKeySaved),
+                    available: active && (!shared || !shareKeySaved),
                     availabilityKnown: true,
                 },
                 exchange: {
@@ -974,7 +1000,7 @@ function createYishuHuanfuActivityService(deps: any) {
             if (!snapshot.active) {
                 throw businessError('YSHF_INACTIVE', '以薯换福活动未在活动期内');
             }
-            if (snapshot.daily.shared) {
+            if (snapshot.daily.shared && snapshot.daily.shareKeySaved) {
                 throw businessError('YSHF_SHARE_ALREADY_DONE', '今日已经分享过铺子，暴击涨价每日只触发一次');
             }
 
@@ -986,6 +1012,12 @@ function createYishuHuanfuActivityService(deps: any) {
             sharedDateKey = getSystemDateKey();
             // 分享暴击会抬高本人铺子收购价，比价里的自己那行要跟着变。
             friendScanCache = null;
+            const share = reply?.yshf_share;
+            const ref = share?.shop?.shop_ref;
+            if (ref?.share_key && int64String(ref.activity_id) === YSHF_ACTIVITY_ID && int64String(ref.gid) === ownGid()) {
+                try { saveOwnShareTicket(ownGid(), String(ref.share_key)); }
+                catch { /* A successful game action must not be reported as failed or replayed. */ }
+            }
 
             // cmd 98 只是“活动内的分享动作”，官方客户端还会走一次
             // ShareService.CheckCanShare → ReportShare{field_1:28, field_4:2017}，
@@ -993,7 +1025,7 @@ function createYishuHuanfuActivityService(deps: any) {
             // 上报失败不阻断主流程，但要把原因透出去，免得用户以为分享没生效。
             let shareReported = false;
             let shareReportError = '';
-            try {
+            if (!snapshot.daily.shared) try {
                 const checkBody = Buffer.from(types.CheckCanShareRequest.encode(
                     types.CheckCanShareRequest.create({}),
                 ).finish());
@@ -1016,17 +1048,15 @@ function createYishuHuanfuActivityService(deps: any) {
                 }
             }
 
-            const share = reply?.yshf_share;
             const grant = share?.grant;
-            const count = grant ? int64String(grant.count) : YSHF_SHARE_SEED_FALLBACK;
+            const count = grant ? int64String(grant.count) : (snapshot.daily.shared ? '0' : YSHF_SHARE_SEED_FALLBACK);
             return {
                 count,
                 seedReward: grant ? itemDto({ item_id: int64String(grant.item_id), count }) : null,
                 price: share ? int64String(share.price) : snapshot.shop.price,
-                shareKey: share?.shop?.share_key || '',
-                shareReported,
+                shareReported: snapshot.daily.shared ? undefined : shareReported,
                 shareReportError,
-                message: count === '0' ? '铺子分享成功' : `铺子分享成功，额外获得 ${count} 个红薯种子`,
+                message: snapshot.daily.shared ? '已尝试补录今日分享票据' : count === '0' ? '铺子分享成功' : `铺子分享成功，额外获得 ${count} 个红薯种子`,
                 snapshot: options.withSnapshot === false ? null : await getActivityCenterSnapshot(),
             };
         });

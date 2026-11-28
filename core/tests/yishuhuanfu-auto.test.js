@@ -137,6 +137,13 @@ test('daily seed and share claims run once, then skip on the server flags', asyn
     assert.ok(second.logs.some(entry => entry.message.includes('今日红薯种子已经领过')));
 });
 
+test('automatic sharing attempts missing own ticket only once per day', async () => {
+    const harness = createHarness({ snapshot: makeSnapshot({ daily: { shared: true, shareKeySaved: false } }) });
+    await harness.automation.runYishuAutomation({ yishu_share: true });
+    await harness.automation.runYishuAutomation({ yishu_share: true });
+    assert.equal(harness.calls.filter(entry => entry[0] === 'shareShop').length, 1);
+});
+
 test('commission is claimed only when the server says it is claimable', async () => {
     const pending = createHarness({
         snapshot: makeSnapshot({ sweetPotatoBalance: '0', commission: { pending: '86', claimable: true } }),
