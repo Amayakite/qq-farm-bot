@@ -37,7 +37,7 @@ const ticketGid = ref('')
 const ticketInput = ref('')
 const ticketBusy = ref(false)
 const ticketNote = ref('')
-const ticketEntries = ref<Array<{ gid: string; updatedAt: number }>>([])
+const ticketEntries = ref<Array<{ gid: string; updatedAt: number; expired: boolean }>>([])
 const exchangeCount = ref('1')
 const busy = computed(() => !!store.pending || store.loading || store.loadingCatalog || store.loadingRecords || store.loadingFriends)
 const sweetPotatoCount = computed(() => store.sweetPotatoCount)
@@ -392,7 +392,7 @@ onUnmounted(() => {
               {{ entry.name || `第 ${entry.index} 档` }}
             </div>
             <div class="mt-2 text-xs text-gray-500">
-              {{ fmt(entry.price) }} 福气币 · 限 {{ fmt(entry.limit) }} 份
+              {{ fmt(entry.price) }} 福气币 · {{ num(entry.limit) > 0 ? `剩余 ${fmt(entry.remaining)} / ${fmt(entry.limit)} 份` : '不限购' }}
             </div>
             <div class="mt-1 flex-1 text-xs" :class="entry.exchangeable ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-400'">
               {{ entry.exchangeable ? '可兑换' : '暂不可兑' }}
@@ -416,7 +416,7 @@ onUnmounted(() => {
       <section v-else class="space-y-4">
         <div class="rounded-xl bg-white p-5 shadow-sm dark:bg-gray-800">
           <h2 class="text-base font-semibold">好友分享票据</h2>
-          <p class="mt-1 text-xs text-gray-500">填写铺主 GID 和好友分享链接或票据，用于当前账号查询和出售。</p>
+          <p class="mt-1 text-xs text-gray-500">填写铺主 GID 和好友当天的分享链接或票据，用于当前账号查询和出售；跨日后需重新添加。</p>
           <div class="mt-4 grid gap-3 sm:grid-cols-2">
             <BaseInput v-model="ticketGid" label="铺主 GID" placeholder="输入好友铺主 GID" />
             <BaseInput v-model="ticketInput" label="分享链接或票据" type="password" autocomplete="off" placeholder="粘贴好友分享内容" />
@@ -427,7 +427,7 @@ onUnmounted(() => {
           </div>
           <div v-if="ticketEntries.length" class="mt-4 divide-y divide-gray-100 dark:divide-gray-700">
             <div v-for="entry in ticketEntries" :key="entry.gid" class="flex items-center justify-between gap-3 py-2 text-sm">
-              <span>铺主 {{ entry.gid }}</span>
+              <span>铺主 {{ entry.gid }} <span v-if="entry.expired" class="text-amber-600 dark:text-amber-400">（已过期，请更新）</span></span>
               <BaseButton size="sm" variant="secondary" :disabled="ticketBusy" @click="removeTicket(entry.gid)">删除</BaseButton>
             </div>
           </div>

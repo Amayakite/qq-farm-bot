@@ -86,7 +86,8 @@ function createHarness(options = {}) {
             if (options.sell) return options.sell(friendGid, count);
             return { count, price: '165', income: String(Number(count) * 165) };
         },
-        getServerTimeSec: () => options.nowSec ?? NOW_SEC,
+        getServerTimeSec: () => options.getServerTimeSec ? options.getServerTimeSec() : (options.nowSec ?? NOW_SEC),
+        getTicketRevision: options.getTicketRevision,
         log: (module, message, meta) => logs.push({ module, message, meta }),
     });
     return {
@@ -270,6 +271,26 @@ test('friend price scan is throttled by the configured interval', async () => {
     assert.equal(harness.calls.filter(entry => entry[0] === 'scanFriends').length, 1);
     // 比价只传好友数上限，force 由自动任务自己控制。
     assert.deepEqual(harness.calls.find(entry => entry[0] === 'scanFriends')[1], { limit: 20, force: true });
+});
+
+test('automatic price cache refreshes after ticket changes and a new server day', async () => {
+    let revision = 'one';
+    let now = NOW_SEC;
+    const harness = createHarness({
+        snapshot: makeSnapshot({ sweetPotatoBalance: '20' }),
+        getTicketRevision: () => revision,
+        getServerTimeSec: () => now,
+    });
+    const config = { yishu_auto_sell: true, yishu_scan_interval_minutes: 120 };
+    await harness.automation.runYishuAutomation(config);
+    await harness.automation.runYishuAutomation(config);
+    assert.equal(harness.calls.filter(entry => entry[0] === 'scanFriends').length, 1);
+    revision = 'two';
+    await harness.automation.runYishuAutomation(config);
+    assert.equal(harness.calls.filter(entry => entry[0] === 'scanFriends').length, 2);
+    now += 86400;
+    await harness.automation.runYishuAutomation(config);
+    assert.equal(harness.calls.filter(entry => entry[0] === 'scanFriends').length, 3);
 });
 
 test('an inactive activity window stops the whole round', async () => {

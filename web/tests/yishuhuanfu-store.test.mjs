@@ -85,7 +85,8 @@ const catalogEntry = overrides => ({
   price: '8500',
   status: 2,
   limit: '50',
-  exchangedToday: '0',
+  exchanged: '0',
+  remaining: '50',
   image: '',
   ...overrides,
 })
@@ -109,6 +110,7 @@ test('catalog keeps the server exchangeable flag and defaults missing flag to cl
     assert.equal(ok, true)
     assert.equal(store.catalog[0].exchangeable, true)
     assert.equal(store.catalog[1].exchangeable, false)
+    assert.equal(store.catalog[0].remaining, '50')
     // 缺 exchangeable 的档位按可兑处理，不能被合成 false。
     catalogPayload = [catalogEntry({})]
     return store.loadCatalog('1001').then(() => {

@@ -52,25 +52,6 @@ const YSHF_SHOP_QUOTA_CAP = '8000';
 /** 背包余额的短缓存：只在轮询间隔内复用，领种子/卖薯/兑换后必须强制重读。 */
 const BALANCE_CACHE_TTL_MS = 10 * 1000;
 
-function collectTenantFriendGids(accountId: string, store: any, readCache: (id: string) => any): Array<{ gid: string; accountName: string }> {
-    const current = accountId && store.getAccountById(accountId);
-    if (!current?.ownerId) return [];
-    const result: Array<{ gid: string; accountName: string }> = [];
-    const seen = new Set<string>();
-    for (const account of store.getAccountsByOwner(current.ownerId)) {
-        const id = String(account?.id || '');
-        if (!id) continue;
-        const gids = readCache(id);
-        if (!Array.isArray(gids)) continue;
-        for (const raw of gids) {
-            const gid = String(raw ?? '');
-            if (!/^\d+$/.test(gid) || gid === '0' || seen.has(gid)) continue;
-            seen.add(gid);
-            result.push({ gid, accountName: String(account.name || account.nick || id) });
-        }
-    }
-    return result;
-}
 /**
  * 背包读取连续失败时，最多沿用多久之前的成功值。
  * 余额变化只发生在本次进程内的几个写操作上（写操作后都会强制刷新缓存），
@@ -86,7 +67,7 @@ const AUTO_BALANCE_STALE_MAX_MS = 60 * 60 * 1000;
 
 /** 好友比价结果缓存时间：cmd 92 是实时行情，短缓存只为防连点刷屏。 */
 const FRIEND_SCAN_TTL_MS = 3 * 60 * 1000;
-// 候选池现在是「本账号好友 + 面板其它账号好友」，上限放宽到 200；超出时按轮换窗口扫。
+// 每轮最多扫描 200 家，超出时按轮换窗口扫。
 const FRIEND_SCAN_DEFAULT_LIMIT = 60;
 const FRIEND_SCAN_MAX_LIMIT = 200;
 const FRIEND_SCAN_CONCURRENCY = 4;
@@ -129,10 +110,6 @@ function createYishuHuanfuActivityService(deps: any) {
         serializeMutation,
         getActivityCenterSnapshot,
         getUserState,
-        // 好友列表默认懒加载，测试可注入桩函数，避免拉起真实的网关请求。
-        getAllFriends: getAllFriendsDep,
-        // 面板其它账号的好友同样可注入，测试不必读写磁盘存档。
-        getPanelFriendGids: getPanelFriendGidsDep,
         getShopTickets: getShopTicketsDep,
     } = deps;
 
@@ -141,7 +118,7 @@ function createYishuHuanfuActivityService(deps: any) {
     let seedClaimedDateKey = '';
     let sharedDateKey = '';
     let friendScanCache: { at: number; data: any; ticketRevision: string } | null = null;
-    // 候选池（本账号好友 + 面板其它账号好友）超过单轮上限时的轮换游标。
+    // 票据候选池超过单轮上限时的轮换游标。
     let friendScanRotation = 0;
     // 背包读取失败时保留原因，随快照一起下发，前端可以显示“余额未知”的具体理由。
     let lastBalanceError = '';
@@ -171,35 +148,6 @@ function createYishuHuanfuActivityService(deps: any) {
             body,
         );
         return types.GetGroupReply.decode(replyBody);
-    }
-
-    /**
-     * 汇总同一租户账号的已知好友缓存。无法确定当前账号归属时只使用本账号好友。
-     */
-    function collectPanelFriendGids(): Array<{ gid: string; accountName: string }> {
-        if (typeof getPanelFriendGidsDep === 'function') {
-            const injected = getPanelFriendGidsDep();
-            if (Array.isArray(injected)) {
-                const result: Array<{ gid: string; accountName: string }> = [];
-                const seen = new Set<string>();
-                for (const raw of injected) {
-                    const gid = int64String(raw?.gid);
-                    if (!gid || gid === '0' || !/^\d+$/.test(gid) || seen.has(gid)) continue;
-                    seen.add(gid);
-                    result.push({ gid, accountName: String(raw?.accountName || '') });
-                }
-                return result;
-            }
-        }
-        try {
-            const { workerData } = require('node:worker_threads');
-            const store = require('../../models/store');
-            const { readKnownFriendGidsCache } = require('../../models/store/gid-cache');
-            const accountId = String(workerData?.accountId || process.env.FARM_ACCOUNT_ID || '');
-            return collectTenantFriendGids(accountId, store, readKnownFriendGidsCache);
-        } catch {
-            return [];
-        }
     }
 
     /**
@@ -257,9 +205,8 @@ function createYishuHuanfuActivityService(deps: any) {
             const matched = !!template && template.price === price;
             const itemId = matched ? template.itemId : null;
             const limit = int64String(entry?.limit || '0');
-            // 兑换后服务端会补 field 5/6，实机均取 1，疑似今日已兑次数，语义待定，
-            // 因此只作为参考值透出，剩余可兑数量仍以 limit 为上限。
-            const exchangedToday = int64String(entry?.field_5 || '0');
+            const exchanged = int64String(entry?.field_6 || '0');
+            const remaining = (BigInt(limit) > BigInt(exchanged) ? BigInt(limit) - BigInt(exchanged) : 0n).toString();
             return {
                 index,
                 itemId,
@@ -269,9 +216,10 @@ function createYishuHuanfuActivityService(deps: any) {
                 price,
                 status: int64Number(entry?.status),
                 limit,
-                exchangedToday,
+                exchanged,
+                remaining,
                 image: itemId ? itemDto({ item_id: itemId, count: '1' }).image : '',
-                exchangeable: true,
+                exchangeable: BigInt(limit) === 0n || BigInt(remaining) > 0n,
             };
         });
     }
@@ -554,22 +502,35 @@ function createYishuHuanfuActivityService(deps: any) {
     }
 
     /**
-     * 查单个铺子的今日行情（cmd 92）。只读，不产生成交，可以拿任意 gid 查，
-     * 好友铺子比价就是靠它逐个扫。
+     * 查单个铺子的今日行情（cmd 92）。好友铺子需要当天的分享票据。
      */
     function shopTickets(): Record<string, { ticket: string; updatedAt: number }> {
-        if (typeof getShopTicketsDep === 'function') return getShopTicketsDep();
-        const { workerData } = require('node:worker_threads');
-        const store = require('../../models/store');
-        const { readTickets } = require('../../models/yishu-tickets');
-        const id = String(workerData?.accountId || process.env.FARM_ACCOUNT_ID || '');
-        const account = store.getAccountById(id);
-        if (!account) throw businessError('YSHF_ACCOUNT_UNAVAILABLE', '无法确认账号归属');
-        return readTickets(account);
+        let entries: Record<string, { ticket: string; updatedAt: number }>;
+        if (typeof getShopTicketsDep === 'function') entries = getShopTicketsDep();
+        else {
+            const { workerData } = require('node:worker_threads');
+            const store = require('../../models/store');
+            const { readTickets } = require('../../models/yishu-tickets');
+            const id = String(workerData?.accountId || process.env.FARM_ACCOUNT_ID || '');
+            const account = store.getAccountById(id);
+            if (!account) throw businessError('YSHF_ACCOUNT_UNAVAILABLE', '无法确认账号归属');
+            entries = readTickets(account);
+        }
+        const today = getSystemDateKey();
+        const active: Record<string, { ticket: string; updatedAt: number }> = {};
+        const { parseTicket } = require('../../models/yishu-tickets');
+        for (const [gid, entry] of Object.entries(entries || {})) {
+            if (!entry?.updatedAt || getSystemDateKey(Number(entry.updatedAt)) !== today) continue;
+            try { active[gid] = { ...entry, ticket: parseTicket(entry.ticket) }; } catch { /* Ignore corrupt tickets. */ }
+        }
+        return active;
     }
 
     async function fetchShopQuote(targetGid: string, tickets = shopTickets()) {
         const ticket = targetGid === ownGid() ? '' : tickets[targetGid]?.ticket;
+        if (targetGid !== ownGid() && !ticket) {
+            throw businessError('YSHF_SHARE_KEY_MISSING', '缺少该铺主今天的分享票据，请先添加');
+        }
         const reply = await operateYshf(types.YshfShopQueryRequest, {
             activity_id: YSHF_ACTIVITY_ID,
             cmd: YSHF_CMD_SHOP_QUERY,
@@ -580,6 +541,9 @@ function createYishuHuanfuActivityService(deps: any) {
         });
         const quote = reply?.yshf_shop?.quote;
         const shop = quote?.shop;
+        if (targetGid !== ownGid() && (!shop || int64String(shop.gid) !== targetGid)) {
+            throw businessError('YSHF_SHOP_UNKNOWN', '返回的铺主与查询目标不一致，请更新分享票据');
+        }
         // 官方抓包（2026-11-25 13:51，好友 1006086548 风筝有风）：
         // quote.base_price=99、quote.bonus_price=66，游戏界面「今日蜜薯收购价」显示 165。
         // 成交价 = 基础价 + 暴击加成，两个字段都不能单独当成交价用。
@@ -653,7 +617,7 @@ function createYishuHuanfuActivityService(deps: any) {
         const force = options?.force === true;
         const now = Date.now();
         const tickets = shopTickets();
-        const ticketRevision = JSON.stringify(tickets);
+        const ticketRevision = `${getSystemDateKey()}:${JSON.stringify(tickets)}`;
         if (!force && friendScanCache && friendScanCache.ticketRevision === ticketRevision && now - friendScanCache.at < FRIEND_SCAN_TTL_MS) {
             return { ...friendScanCache.data, cached: true };
         }
@@ -664,63 +628,15 @@ function createYishuHuanfuActivityService(deps: any) {
         }
         const own = ownGid();
 
-        let friends: any[] = [];
-        let friendListError = '';
-        try {
-            const loader = typeof getAllFriendsDep === 'function'
-                ? getAllFriendsDep
-                : () => require('../friend/api').getAllFriends(false, 'low');
-            const reply = await loader(false, 'low');
-            if (Array.isArray(reply?.game_friends)) friends = reply.game_friends;
-            else if (Array.isArray(reply?.gameFriends)) friends = reply.gameFriends;
-        } catch (error: any) {
-            friendListError = error?.message || '好友列表获取失败';
-        }
-
-        const panelFriends = collectPanelFriendGids();
-
+        // Only today’s tickets can identify a friend's real quote. Other accounts and
+        // tenants never contribute candidates without an explicit account-scoped import.
         const targets: any[] = [];
-        const seen = new Set<string>();
-        if (own) {
-            targets.push({ gid: own, own: true, name: '我的铺子', avatar: '', level: '0', via: 'own' });
-            seen.add(own);
-        }
+        if (own) targets.push({ gid: own, own: true, name: '我的铺子', avatar: '', level: '0', via: 'own' });
         for (const gid of Object.keys(tickets)) {
-            if (seen.has(gid)) continue;
-            seen.add(gid);
-            targets.push({ gid, own: false, name: '', avatar: '', level: '0', via: 'ticket' });
+            if (gid !== own) targets.push({ gid, own: false, name: '', avatar: '', level: '0', via: 'ticket' });
         }
-        for (const friend of friends) {
-            const gid = int64String(friend?.gid);
-            if (!gid || gid === '0' || seen.has(gid)) continue;
-            seen.add(gid);
-            targets.push({
-                gid,
-                own: gid === own,
-                name: friend?.remark || friend?.name || gid,
-                avatar: friend?.avatar_url || '',
-                level: int64String(friend?.level),
-                via: 'friend',
-            });
-        }
-        // 面板里其它账号的好友同样并进来：蜜薯能卖给任何开着铺子的人，
-        // 不限于本账号好友，候选池越大越容易挑到当日最高价。
-        let panelCount = 0;
-        for (const entry of panelFriends) {
-            if (seen.has(entry.gid)) continue;
-            seen.add(entry.gid);
-            panelCount += 1;
-            targets.push({
-                gid: entry.gid,
-                own: false,
-                // 名字靠 cmd 92 回包里的铺主信息补，界面没有名字时会退化成显示 GID。
-                name: '',
-                avatar: '',
-                level: '0',
-                via: 'panel',
-                panelAccount: entry.accountName,
-            });
-        }
+        const panelCount = 0;
+        const friendListError = '';
         const slice = takeScanWindow(targets, limit, !!own);
 
         const shops: any[] = [];
@@ -771,7 +687,7 @@ function createYishuHuanfuActivityService(deps: any) {
             ownShop: shops.find(entry => entry.own) || null,
             scanned: slice.length,
             failed,
-            // 候选池 = 本账号好友 + 面板里其它账号的已知好友（去重后）。
+            // 候选池只包含当前账号持有当天票据的铺子。
             friendCount: targets.length - (own ? 1 : 0),
             panelFriendCount: panelCount,
             candidateCount: targets.length - (own ? 1 : 0),
@@ -834,8 +750,11 @@ function createYishuHuanfuActivityService(deps: any) {
             // 卖给好友铺子前先查一次行情（cmd 92）：确认铺主 gid 与请求一致、
             // 对方现在收不收（can_sell）、剩余接收额度够用，避免“卖出去才发现
             // 铺子不是这个人的 / 已经收满关张”。自己的铺子不限量，不需要这一步。
+            let ticket = '';
             if (targetGid !== own) {
-                const quote = await fetchShopQuote(targetGid);
+                const tickets = shopTickets();
+                ticket = tickets[targetGid]?.ticket || '';
+                const quote = await fetchShopQuote(targetGid, tickets);
                 if (!quote.shop || quote.shop.gid !== targetGid) {
                     throw businessError('YSHF_SHOP_UNKNOWN', `无法确认铺子 ${targetGid} 的主人，本次未出售`);
                 }
@@ -853,12 +772,18 @@ function createYishuHuanfuActivityService(deps: any) {
                         `${quote.shop.name || targetGid} 的铺子今日只剩 ${quote.quota} 个接收额度，不足 ${count} 个`,
                     );
                 }
+                if (shopTickets()[targetGid]?.ticket !== ticket) {
+                    throw businessError('YSHF_SHARE_KEY_MISSING', '分享票据已过期或发生变化，请重新比价');
+                }
             }
 
             const reply = await operateYshf(types.YshfSellRequest, {
                 activity_id: YSHF_ACTIVITY_ID,
                 cmd: YSHF_CMD_SELL,
-                params: { shop_gid: targetGid, count },
+                params: {
+                    shop_gid: targetGid, count,
+                    ...(ticket ? { ticket: { activity_id: YSHF_ACTIVITY_ID, shop_gid: targetGid, nonce: ticket } } : {}),
+                },
             });
             const result = reply?.yshf_sell;
             // 成交会改变目标铺子的剩余额度与自己的福气币，比价缓存必须失效。
@@ -1007,9 +932,9 @@ function createYishuHuanfuActivityService(deps: any) {
             }
             const cost = BigInt(goods.price) * BigInt(count);
             const limit = BigInt(goods.limit || '0');
-            // limit 是这一档“剩余可兑”次数，超了服务端会整单拒绝，这里提前拦住。
-            if (limit > 0n && BigInt(count) > limit) {
-                throw businessError('YSHF_EXCEED_LIMIT', `本档剩余可兑换 ${limit} 次，本次选择了 ${count} 次`);
+            const remaining = BigInt(goods.remaining || '0');
+            if (limit > 0n && BigInt(count) > remaining) {
+                throw businessError('YSHF_EXCEED_LIMIT', `本档剩余可兑换 ${remaining} 次，本次选择了 ${count} 次`);
             }
             const balance = snapshot.luckCoin.balance;
             if (balance !== null && BigInt(balance) < cost) {
@@ -1116,6 +1041,7 @@ function createYishuHuanfuActivityService(deps: any) {
 
     return {
         getCurrentYishuHuanfuActivity,
+        getYishuTicketRevision: () => JSON.stringify(shopTickets()),
         claimYishuHuanfuSeeds,
         queryYishuHuanfuShop,
         scanYishuHuanfuFriendShops,
@@ -1129,4 +1055,4 @@ function createYishuHuanfuActivityService(deps: any) {
     };
 }
 
-module.exports = { createYishuHuanfuActivityService, collectTenantFriendGids };
+module.exports = { createYishuHuanfuActivityService };

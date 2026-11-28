@@ -135,10 +135,10 @@ function createHarness(options = {}) {
             return { items: [] };
         },
         // 日期键按真实日期算（UTC+8），这样 quote_time 的“今天/昨天”判定可以被测到。
-        getSystemDateKey: (nowMs) => {
+        getSystemDateKey: options.getSystemDateKey || ((nowMs) => {
             const ms = typeof nowMs === 'number' ? nowMs : built.now * 1000;
             return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10);
-        },
+        }),
         getServerTimeSec: () => built.now,
         // proto 解出来的 int64 是 Long，必须走 toString 再转数字。
         int64String: value => (value == null ? '0' : String(value)),
@@ -164,7 +164,10 @@ function createHarness(options = {}) {
         getAllFriends: options.getAllFriends || (async () => ({ game_friends: [] })),
         // 面板其它账号的好友默认空，测试可注入以覆盖跨账号候选池。
         getPanelFriendGids: options.getPanelFriendGids || (() => []),
-        getShopTickets: options.getShopTickets || (() => ({})),
+        getShopTickets: options.getShopTickets || (() => Object.fromEntries(
+            Object.keys(options.shopQuotes || {}).filter(gid => gid !== '1220537209')
+                .map(gid => [gid, { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: built.now * 1000 }]),
+        )),
     });
     const operateRequest = () => requests.filter(entry => entry.method === 'Operate');
     return { service, requests, built, operateRequest };
@@ -595,6 +598,7 @@ test('yishuhuanfu sell proceeds when the reply omits can_sell', async () => {
 test('yishuhuanfu friend scan tolerates a failing friend and caches the result', async () => {
     const harness = createHarness({
         shopQuotes: { 1220537209: { price: '116', quota: '7000' } },
+        getShopTickets: () => ({ 900001: { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: Date.now() } }),
         getAllFriends: async () => ({
             game_friends: [{ gid: '900001', name: '离线好友' }],
         }),
@@ -737,7 +741,7 @@ test('yishuhuanfu commission stays unclaimable when nobody sold into the shop', 
     assert.equal(snapshot.commission.claimable, false);
 });
 
-test('yishuhuanfu scan pools supplied tenant friends, dedupes and rotates the window', async () => {
+test('yishuhuanfu scan rotates through ticket-backed shops only', async () => {
     const quotes = {
         1220537209: { price: '100', quota: '8000', name: '自己' },
         900001: { price: '210', quota: '3000', name: '本号好友' },
@@ -758,7 +762,7 @@ test('yishuhuanfu scan pools supplied tenant friends, dedupes and rotates the wi
     });
     // 上限 4：自己 + 3 个候选，候选池 4 个好友里有一个要等下一轮。
     const result = await harness.service.scanYishuHuanfuFriendShops({ force: true, limit: 4 });
-    assert.equal(result.panelFriendCount, 3);
+    assert.equal(result.panelFriendCount, 0);
     assert.equal(result.friendCount, 4);
     assert.equal(result.scanned, 4);
     assert.equal(result.pendingCount, 1);
@@ -768,12 +772,10 @@ test('yishuhuanfu scan pools supplied tenant friends, dedupes and rotates the wi
         .map(entry => String(types.YshfShopQueryRequest.decode(Buffer.from(entry.body)).params?.shop_gid));
     assert.equal(new Set(queried).size, queried.length, '重复 GID 不能查两次');
 
-    const panelRows = result.shops.filter(entry => entry.via === 'panel');
-    assert.ok(panelRows.length >= 1);
-    // 面板好友没有本地备注，界面上用 cmd 92 回包的铺主昵称补齐。
-    assert.ok(panelRows.every(entry => entry.name && entry.name !== entry.gid));
-    assert.ok(panelRows.every(entry => entry.panelAccount === 'A号' || entry.panelAccount === 'B号'));
-    assert.equal(result.shops.find(entry => entry.gid === '900001').via, 'friend');
+    const ticketRows = result.shops.filter(entry => entry.via === 'ticket');
+    assert.ok(ticketRows.length >= 1);
+    assert.ok(ticketRows.every(entry => entry.name && entry.name !== entry.gid));
+    assert.equal(result.shops.find(entry => entry.gid === '900001').via, 'ticket');
     assert.equal(result.shops.find(entry => entry.gid === '1220537209').via, 'own');
 
     // 下一轮从游标接着扫：上一轮没轮到的 GID 必须出现，且自己的铺子仍在。
@@ -782,34 +784,11 @@ test('yishuhuanfu scan pools supplied tenant friends, dedupes and rotates the wi
     assert.equal(allGids.size, 5, '两轮轮换应覆盖自己 + 4 个候选好友');
 });
 
-test('panel friend cache reads are limited to the current account owner', () => {
-    const { collectTenantFriendGids } = require('../dist/services/activity-center/yishuhuanfu');
-    const accounts = [
-        { id: '1', ownerId: 'a', name: 'one' },
-        { id: '2', ownerId: 'a', name: 'two' },
-        { id: '3', ownerId: 'b', name: 'private' },
-    ];
-    const store = {
-        getAccountById: id => accounts.find(account => account.id === id),
-        getAccountsByOwner: ownerId => accounts.filter(account => account.ownerId === ownerId),
-    };
-    const reads = [];
-    const readCache = id => { reads.push(id); return id === '1' ? [101, 102] : [102, 103]; };
-    assert.deepEqual(collectTenantFriendGids('1', store, readCache), [
-        { gid: '101', accountName: 'one' },
-        { gid: '102', accountName: 'one' },
-        { gid: '103', accountName: 'two' },
-    ]);
-    assert.deepEqual(reads, ['1', '2']);
-    assert.deepEqual(collectTenantFriendGids('missing', store, readCache), []);
-    assert.deepEqual(reads, ['1', '2']);
-});
-
 test('friend quote uses the account share ticket in the verified protocol fields', async () => {
     const gid = '910001';
     const token = '12345678-1234-1234-1234-123456789abc';
     const harness = createHarness({
-        getShopTickets: () => ({ [gid]: { ticket: token, updatedAt: 1 } }),
+        getShopTickets: () => ({ [gid]: { ticket: token, updatedAt: Date.now() } }),
         shopQuotes: { [gid]: { price: '100', quota: '800', name: '好友' } },
     });
     await harness.service.queryYishuHuanfuShop(gid);
@@ -819,6 +798,75 @@ test('friend quote uses the account share ticket in the verified protocol fields
     assert.equal(String(decoded.params.ticket.activity_id), ACTIVITY_ID);
     assert.equal(String(decoded.params.ticket.shop_gid), gid);
     assert.equal(decoded.params.ticket.nonce, token);
+});
+
+test('friend sale carries the same ticket as its quote; own sale carries none', async () => {
+    const gid = '910001';
+    const ticket = '12345678-1234-1234-1234-123456789abc';
+    const harness = createHarness({
+        sweetPotato: '100',
+        getShopTickets: () => ({ [gid]: { ticket, updatedAt: Date.now() } }),
+        shopQuotes: { [gid]: { price: '100', quota: '800' } },
+    });
+    await harness.service.sellYishuHuanfuSweetPotato(gid, 10);
+    await harness.service.sellYishuHuanfuSweetPotato(null, 10);
+    const sales = harness.operateRequest().filter(entry => readRequestCmd(Buffer.from(entry.body)) === 93)
+        .map(entry => types.YshfSellRequest.decode(Buffer.from(entry.body)));
+    assert.equal(sales[0].params.ticket.nonce, ticket);
+    assert.equal(String(sales[0].params.ticket.shop_gid), gid);
+    assert.equal(String(sales[0].params.ticket.activity_id), ACTIVITY_ID);
+    assert.equal(sales[1].params.ticket, null);
+});
+
+test('missing and expired tickets never query or sell a friend shop, including after midnight', async () => {
+    const gid = '910001';
+    const savedAt = Date.now();
+    let today = 'day-one';
+    const harness = createHarness({
+        sweetPotato: '100',
+        getSystemDateKey: ms => ms === undefined ? today : 'day-one',
+        getShopTickets: () => ({ [gid]: { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: savedAt } }),
+        shopQuotes: { '1220537209': { price: '90', quota: '8000' }, [gid]: { price: '110', quota: '500' } },
+    });
+    assert.ok((await harness.service.scanYishuHuanfuFriendShops()).shops.some(shop => shop.gid === gid));
+    today = 'day-two';
+    const next = await harness.service.scanYishuHuanfuFriendShops();
+    assert.equal(next.cached, false);
+    assert.deepEqual(next.shops.map(shop => shop.gid), ['1220537209']);
+    const before = harness.operateRequest().length;
+    await assert.rejects(() => harness.service.queryYishuHuanfuShop(gid), error => error.code === 'YSHF_SHARE_KEY_MISSING');
+    await assert.rejects(() => harness.service.sellYishuHuanfuSweetPotato(gid, 10), error => error.code === 'YSHF_SHARE_KEY_MISSING');
+    assert.equal(harness.operateRequest().length, before);
+});
+
+test('friend quote cannot silently pass off the own shop as the target', async () => {
+    const gid = '910001';
+    const harness = createHarness({
+        shopQuotes: { [gid]: { price: '100', quota: '800' } },
+        operateReply: cmd => cmd === 92
+            ? { yshf_shop: shopQuotePayload('1220537209', { price: '100', quota: '800' }) }
+            : {},
+    });
+    await assert.rejects(() => harness.service.queryYishuHuanfuShop(gid), error => error.code === 'YSHF_SHOP_UNKNOWN');
+    const scan = await harness.service.scanYishuHuanfuFriendShops({ force: true });
+    assert.ok(!scan.shops.some(shop => shop.gid === gid));
+});
+
+test('exchange counts use the cumulative field and reject above remaining quota', async () => {
+    const harness = createHarness({
+        stateLuckCoin: '2000000',
+        catalog: [
+            { index: '1', price: '1000000', limit: '1', field_6: '1' },
+            { index: '10', price: '7000', limit: '50', field_5: '1', field_6: '48' },
+        ],
+    });
+    const result = await harness.service.queryYishuHuanfuCatalog();
+    assert.equal(result.catalog[0].remaining, '0');
+    assert.equal(result.catalog[0].exchangeable, false);
+    assert.equal(result.catalog[1].remaining, '2');
+    assert.equal(result.catalog[1].exchanged, '48');
+    await assert.rejects(() => harness.service.exchangeYishuHuanfuGoods(10, 3), error => error.code === 'YSHF_EXCEED_LIMIT');
+    assert.ok(!harness.operateRequest().some(entry => readRequestCmd(Buffer.from(entry.body)) === 96));
 });
 
 test('imported ticket is included in scan and refreshes cached quotes after replacement', async () => {
@@ -833,7 +881,7 @@ test('imported ticket is included in scan and refreshes cached quotes after repl
     });
     const first = await harness.service.scanYishuHuanfuFriendShops({ limit: 5 });
     assert.equal(first.shops.length, 1);
-    saved = { [gid]: { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: 1 } };
+    saved = { [gid]: { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: Date.now() } };
     const next = await harness.service.scanYishuHuanfuFriendShops({ limit: 5 });
     assert.equal(next.cached, false);
     assert.ok(next.shops.some(shop => shop.gid === gid));

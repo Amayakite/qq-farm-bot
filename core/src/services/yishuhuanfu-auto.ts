@@ -37,6 +37,7 @@ const YISHU_SKIP_SHOP_CODES = new Set([
     'YSHF_SHOP_UNKNOWN',
     // can_sell = false：这家铺子当前不收蜜薯，换下一家，不算整轮失败。
     'YSHF_SHOP_CLOSED',
+    'YSHF_SHARE_KEY_MISSING',
 ]);
 
 const DEFAULT_FRIEND_LIMIT = 60;
@@ -114,15 +115,16 @@ function createYishuAutomation(deps: {
     shareShop: (options?: any) => Promise<any>;
     claimCommission: (options?: any) => Promise<any>;
     scanFriends: (options?: any) => Promise<any>;
+    getTicketRevision?: () => string;
     sell: (friendGid: any, count: any, options?: any) => Promise<any>;
     getServerTimeSec: () => number;
     log: (module: string, message: string, meta?: any) => void;
 }) {
-    const { getActivity, claimSeed, shareShop, claimCommission, scanFriends, sell, getServerTimeSec, log } = deps;
+    const { getActivity, claimSeed, shareShop, claimCommission, scanFriends, getTicketRevision, sell, getServerTimeSec, log } = deps;
     // 跳过原因按服务端日期去重：10 分钟一轮若每轮都记一行「今天已经领过」，日志会被刷满。
     const skipLoggedOn = new Map<string, string>();
     // 比价结果按「好友数上限 + 配置间隔」复用，避免每轮都把好友扫一遍。
-    let scanCache: { at: number; limit: number; shops: any[] } | null = null;
+    let scanCache: { at: number; dateKey: string; ticketRevision: string; limit: number; shops: any[] } | null = null;
 
     function todayKey(): string {
         return new Date((getServerTimeSec() + 8 * 3600) * 1000).toISOString().slice(0, 10);
@@ -149,11 +151,12 @@ function createYishuAutomation(deps: {
      */
     async function rankedShops(limit: number, intervalMinutes: number): Promise<any[]> {
         const now = Date.now();
-        if (scanCache && scanCache.limit === limit && now - scanCache.at < intervalMinutes * 60 * 1000)
+        const ticketRevision = getTicketRevision?.() || '';
+        if (scanCache && scanCache.ticketRevision === ticketRevision && scanCache.dateKey === todayKey() && scanCache.limit === limit && now - scanCache.at < intervalMinutes * 60 * 1000)
             return scanCache.shops;
         const result = await scanFriends({ limit, force: true });
         const shops = Array.isArray(result?.shops) ? result.shops : [];
-        scanCache = { at: now, limit, shops };
+        scanCache = { at: now, dateKey: todayKey(), ticketRevision, limit, shops };
         return shops;
     }
 
@@ -506,6 +509,7 @@ async function runYishuTick(isReady: () => boolean): Promise<void> {
                 shareShop: activity.shareYishuHuanfuShop,
                 claimCommission: activity.claimYishuHuanfuCommission,
                 scanFriends: activity.scanYishuHuanfuFriendShops,
+                getTicketRevision: activity.getYishuTicketRevision,
                 sell: activity.sellYishuHuanfuSweetPotato,
                 getServerTimeSec,
                 log,

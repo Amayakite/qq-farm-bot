@@ -614,6 +614,7 @@ module.exports = {
     claimCharityRedFlowerDailyGift,
     claimCharityRedFlowerProgressReward,
     getCurrentYishuHuanfuActivity: yishuHuanfuService.getCurrentYishuHuanfuActivity,
+    getYishuTicketRevision: yishuHuanfuService.getYishuTicketRevision,
     claimYishuHuanfuSeeds: yishuHuanfuService.claimYishuHuanfuSeeds,
     queryYishuHuanfuShop: yishuHuanfuService.queryYishuHuanfuShop,
     scanYishuHuanfuFriendShops: yishuHuanfuService.scanYishuHuanfuFriendShops,

@@ -33,7 +33,8 @@ export interface YshfCatalogEntry {
   price: string
   status: number
   limit: string
-  exchangedToday: string
+  exchanged: string
+  remaining: string
   image: string
   exchangeable: boolean
 }
@@ -165,7 +166,8 @@ function normalizeCatalogEntry(entry: Record<string, any>): YshfCatalogEntry {
     price: text(entry.price),
     status: finiteNumber(entry.status),
     limit: text(entry.limit),
-    exchangedToday: text(entry.exchangedToday, entry.exchanged_today, '0'),
+    exchanged: text(entry.exchanged, '0'),
+    remaining: text(entry.remaining, entry.limit, '0'),
     image: text(entry.image),
     // 后端没带 exchangeable 时按可兑处理，价格够不够由渲染层再判一次。
     exchangeable: entry.exchangeable === null || entry.exchangeable === undefined

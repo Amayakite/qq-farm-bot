@@ -84,6 +84,7 @@ const ACTIVITY_ERROR_MESSAGES: Record<string, string> = {
     INVALID_YSHF_TICKET: '请输入包含唯一票据的好友分享链接或票据',
     INVALID_YSHF_SHOP_GID: '请输入有效的铺主 GID',
     YSHF_ACCOUNT_UNAVAILABLE: '无法确认账号归属，请刷新后重试',
+    YSHF_SHARE_KEY_MISSING: '缺少该铺主当天的分享票据，请在好友比价中重新添加',
     '1034184': '分享票据无效或已失效，请重新导入好友分享链接',
     INSUFFICIENT_YSHF_SWEET_POTATO: '背包蜜薯数量不足',
     INSUFFICIENT_YSHF_LUCK_COIN: '福气币不足，无法兑换',

@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { getDataDir } = require('../config/runtime-paths');
 const { readJsonFileStrict, writeJsonFileAtomic } = require('../services/json-db');
+const { getSystemDateKey } = require('../utils/utils');
 
 function normalizeGid(value: unknown): string {
     const gid = String(value ?? '').trim();
@@ -22,7 +23,10 @@ function parseTicket(value: unknown): string {
     const matches = decoded.match(/(?<![a-f\d])(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|[a-f\d]{32})(?![a-f\d])/gi) || [];
     const unique = [...new Set(matches.map((match: string) => match.toLowerCase()))];
     if (unique.length !== 1) throw Object.assign(new Error('无法从输入中确定唯一的分享票据'), { code: 'INVALID_YSHF_TICKET' });
-    return unique[0];
+    const ticket = unique[0];
+    return ticket.length === 32
+        ? `${ticket.slice(0, 8)}-${ticket.slice(8, 12)}-${ticket.slice(12, 16)}-${ticket.slice(16, 20)}-${ticket.slice(20)}`
+        : ticket;
 }
 
 function fileFor(account: any): string {
@@ -41,9 +45,11 @@ function readTickets(account: any): Record<string, { ticket: string; updatedAt: 
     return data;
 }
 
-function listTickets(account: any): Array<{ gid: string; updatedAt: number }> {
+function listTickets(account: any): Array<{ gid: string; updatedAt: number; expired: boolean }> {
+    const today = getSystemDateKey();
     return Object.entries(readTickets(account)).map(([gid, value]: [string, any]) => ({
         gid, updatedAt: Number(value?.updatedAt) || 0,
+        expired: !Number(value?.updatedAt) || getSystemDateKey(Number(value.updatedAt)) !== today,
     }));
 }
 
