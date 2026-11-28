@@ -1,7 +1,23 @@
 import type { Request } from 'express';
 import type { ActivityRouteContext } from './types';
 
+const accountStore = require('../../../models/store');
+const tickets = require('../../../models/yishu-tickets');
+
 export function mountYishuHuanfuActivityRoutes({ app, ctx, withAccount, mountGet }: ActivityRouteContext): void {
+    app.get('/api/activity-center/yishuhuanfu/tickets', withAccount(async (accountId: string) => (
+        tickets.listTickets(accountStore.getAccountById(accountId))
+    )));
+    app.post('/api/activity-center/yishuhuanfu/tickets', withAccount(async (accountId: string, req: Request) => {
+        const account = accountStore.getAccountById(accountId);
+        tickets.saveTicket(account, req.body?.gid, req.body?.ticket);
+        return tickets.listTickets(account);
+    }));
+    app.delete('/api/activity-center/yishuhuanfu/tickets/:gid', withAccount(async (accountId: string, req: Request) => {
+        const account = accountStore.getAccountById(accountId);
+        tickets.removeTicket(account, req.params.gid);
+        return tickets.listTickets(account);
+    }));
     mountGet('/api/activity-center/yishuhuanfu', 'getCurrentYishuHuanfuActivity');
     mountGet('/api/activity-center/yishuhuanfu/catalog', 'queryYishuHuanfuCatalog');
     // 收购记录列表（cmd 95，只读）：界面「只展示最近 30 条」。

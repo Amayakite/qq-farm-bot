@@ -500,10 +500,13 @@ export const useYishuHuanfuStore = defineStore('yishuhuanfu', () => {
       friendScanAt.value = finiteNumber(payload.scannedAt ?? payload.scanned_at) || Date.now()
       const scanned = finiteNumber(payload.scanned)
       const failed = finiteNumber(payload.failed)
-      notes.value.friends = text(payload.friendListError, payload.friend_list_error)
+      const summary = text(payload.friendListError, payload.friend_list_error)
         || text(payload.message)
-        || (scanned === 0 ? '没有可查询的铺子'
-          : `已扫描 ${friendShops.value.length} 个铺子${failed ? `，${failed} 个查询失败` : ''}`)
+        || (scanned === 0 ? '没有可查询的铺子' : `已扫描 ${friendShops.value.length} 个铺子`)
+      const failure = text(payload.errorMessage, payload.error_message)
+      notes.value.friends = failed
+        ? `${summary}，${failed} 个查询失败${failure ? `：${failure}` : ''}`
+        : summary
       return true
     }
     catch (err: any) {

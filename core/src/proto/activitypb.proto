@@ -281,7 +281,15 @@ message YshfClaimSeedRequest {
 
 // cmd 92 查询指定铺子的今日行情。shop_gid 传本人 gid 即查自己铺子。
 message YshfShopQueryRequest {
-    message Params { int64 shop_gid = 1; }
+    message Ticket {
+        int64 activity_id = 1;
+        int64 shop_gid = 2;
+        string nonce = 3;
+    }
+    message Params {
+        int64 shop_gid = 1;
+        Ticket ticket = 2;
+    }
     int64 activity_id = 1;
     int64 cmd = 2;
     Params params = 192;

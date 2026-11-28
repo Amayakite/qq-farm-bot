@@ -198,6 +198,32 @@ test('friend scan keeps panel-source tags and shows backend message', async () =
   } finally { api.get = originalGet }
 })
 
+test('friend scan reports partial failures even when the server includes a success summary', async () => {
+  const store = freshStore()
+  const originalGet = api.get
+  api.get = async (url, config) => {
+    const res = await originalGet(url, config)
+    if (url.endsWith('/friends')) {
+      Object.assign(res.data.data, {
+        shops: [{ gid: '1', own: true }],
+        scanned: 5,
+        failed: 4,
+        message: '已扫描 1 个铺子',
+        errorMessage: '分享链接已失效，请重新联系店主分享',
+      })
+    }
+    return res
+  }
+  try {
+    await store.load('1001')
+    assert.equal(await store.scanFriendShops('1001', true), true)
+    assert.match(store.notes.friends, /4 个查询失败/)
+    assert.match(store.notes.friends, /分享链接已失效/)
+  } finally {
+    api.get = originalGet
+  }
+})
+
 test('snapshot refresh keeps the loaded catalog instead of flashing the skeleton', async () => {
   const store = freshStore()
   catalogPayload = [catalogEntry({ exchangeable: true, price: '8500' })]

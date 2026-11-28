@@ -164,6 +164,7 @@ function createHarness(options = {}) {
         getAllFriends: options.getAllFriends || (async () => ({ game_friends: [] })),
         // 面板其它账号的好友默认空，测试可注入以覆盖跨账号候选池。
         getPanelFriendGids: options.getPanelFriendGids || (() => []),
+        getShopTickets: options.getShopTickets || (() => ({})),
     });
     const operateRequest = () => requests.filter(entry => entry.method === 'Operate');
     return { service, requests, built, operateRequest };
@@ -802,4 +803,44 @@ test('panel friend cache reads are limited to the current account owner', () => 
     assert.deepEqual(reads, ['1', '2']);
     assert.deepEqual(collectTenantFriendGids('missing', store, readCache), []);
     assert.deepEqual(reads, ['1', '2']);
+});
+
+test('friend quote uses the account share ticket in the verified protocol fields', async () => {
+    const gid = '910001';
+    const token = '12345678-1234-1234-1234-123456789abc';
+    const harness = createHarness({
+        getShopTickets: () => ({ [gid]: { ticket: token, updatedAt: 1 } }),
+        shopQuotes: { [gid]: { price: '100', quota: '800', name: '好友' } },
+    });
+    await harness.service.queryYishuHuanfuShop(gid);
+    const request = harness.operateRequest().find(entry => readRequestCmd(Buffer.from(entry.body)) === 92);
+    const decoded = types.YshfShopQueryRequest.decode(Buffer.from(request.body));
+    assert.equal(String(decoded.params.shop_gid), gid);
+    assert.equal(String(decoded.params.ticket.activity_id), ACTIVITY_ID);
+    assert.equal(String(decoded.params.ticket.shop_gid), gid);
+    assert.equal(decoded.params.ticket.nonce, token);
+});
+
+test('imported ticket is included in scan and refreshes cached quotes after replacement', async () => {
+    const gid = '910002';
+    let saved = {};
+    const harness = createHarness({
+        getShopTickets: () => saved,
+        shopQuotes: {
+            '1220537209': { price: '90', quota: '8000' },
+            [gid]: { price: '110', quota: '500', name: '好友' },
+        },
+    });
+    const first = await harness.service.scanYishuHuanfuFriendShops({ limit: 5 });
+    assert.equal(first.shops.length, 1);
+    saved = { [gid]: { ticket: '12345678-1234-1234-1234-123456789abc', updatedAt: 1 } };
+    const next = await harness.service.scanYishuHuanfuFriendShops({ limit: 5 });
+    assert.equal(next.cached, false);
+    assert.ok(next.shops.some(shop => shop.gid === gid));
+    const request = harness.operateRequest()
+        .map(entry => Buffer.from(entry.body))
+        .filter(body => readRequestCmd(body) === 92)
+        .map(body => types.YshfShopQueryRequest.decode(body))
+        .find(entry => String(entry.params.shop_gid) === gid);
+    assert.equal(request.params.ticket.nonce, saved[gid].ticket);
 });

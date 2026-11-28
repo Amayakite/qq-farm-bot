@@ -5,6 +5,7 @@
  * 不引入上游的 Naive UI 或独立页面壳。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
@@ -32,6 +33,11 @@ const manualGid = ref('')
 const manualQuote = ref<YshfFriendShop | null>(null)
 const manualNote = ref('')
 const queryingQuote = ref(false)
+const ticketGid = ref('')
+const ticketInput = ref('')
+const ticketBusy = ref(false)
+const ticketNote = ref('')
+const ticketEntries = ref<Array<{ gid: string; updatedAt: number }>>([])
 const exchangeCount = ref('1')
 const busy = computed(() => !!store.pending || store.loading || store.loadingCatalog || store.loadingRecords || store.loadingFriends)
 const sweetPotatoCount = computed(() => store.sweetPotatoCount)
@@ -50,6 +56,55 @@ const friendOptions = computed(() => [
       value: shop.gid,
     })),
 ])
+
+async function loadTickets(id: string) {
+  try {
+    const { data } = await api.get('/api/activity-center/yishuhuanfu/tickets', { headers: { 'x-account-id': id } })
+    if (accountId.value !== id) return
+    if (!data?.ok) throw new Error(getApiErrorMessage(data, '读取票据失败'))
+    ticketEntries.value = Array.isArray(data.data) ? data.data : []
+  } catch (error: any) {
+    if (accountId.value === id) ticketNote.value = getApiErrorMessage(error, '读取票据失败')
+  }
+}
+
+async function saveTicket() {
+  const id = accountId.value
+  if (!id || ticketBusy.value) return
+  ticketBusy.value = true
+  ticketNote.value = ''
+  try {
+    const { data } = await api.post('/api/activity-center/yishuhuanfu/tickets', {
+      gid: ticketGid.value.trim(), ticket: ticketInput.value.trim(),
+    }, { headers: { 'x-account-id': id } })
+    if (accountId.value !== id) return
+    if (!data?.ok) throw new Error(getApiErrorMessage(data, '保存票据失败'))
+    ticketEntries.value = data.data
+    ticketGid.value = ''
+    ticketInput.value = ''
+    ticketNote.value = '票据已保存，可重新比价'
+    await store.scanFriendShops(id, true)
+  } catch (error: any) {
+    if (accountId.value === id) ticketNote.value = getApiErrorMessage(error, '保存票据失败')
+  } finally { ticketBusy.value = false }
+}
+
+async function removeTicket(gid: string) {
+  const id = accountId.value
+  if (!id || ticketBusy.value) return
+  ticketBusy.value = true
+  ticketNote.value = ''
+  try {
+    const { data } = await api.delete(`/api/activity-center/yishuhuanfu/tickets/${encodeURIComponent(gid)}`, { headers: { 'x-account-id': id } })
+    if (accountId.value !== id) return
+    if (!data?.ok) throw new Error(getApiErrorMessage(data, '删除票据失败'))
+    ticketEntries.value = data.data
+    ticketNote.value = '票据已删除'
+    await store.scanFriendShops(id, true)
+  } catch (error: any) {
+    if (accountId.value === id) ticketNote.value = getApiErrorMessage(error, '删除票据失败')
+  } finally { ticketBusy.value = false }
+}
 
 function num(value: unknown) {
   const n = Number(value || 0)
@@ -136,6 +191,11 @@ async function scan(force = false) {
 watch(accountId, (id) => {
   manualQuote.value = null
   manualNote.value = ''
+  ticketGid.value = ''
+  ticketInput.value = ''
+  ticketEntries.value = []
+  ticketNote.value = ''
+  if (id) void loadTickets(id)
   if (id) void store.load(id)
   else store.clear()
 }, { immediate: true })
@@ -354,6 +414,24 @@ onUnmounted(() => {
 
       <!-- 好友比价 -->
       <section v-else class="space-y-4">
+        <div class="rounded-xl bg-white p-5 shadow-sm dark:bg-gray-800">
+          <h2 class="text-base font-semibold">好友分享票据</h2>
+          <p class="mt-1 text-xs text-gray-500">填写铺主 GID 和好友分享链接或票据，用于当前账号查询和出售。</p>
+          <div class="mt-4 grid gap-3 sm:grid-cols-2">
+            <BaseInput v-model="ticketGid" label="铺主 GID" placeholder="输入好友铺主 GID" />
+            <BaseInput v-model="ticketInput" label="分享链接或票据" type="password" autocomplete="off" placeholder="粘贴好友分享内容" />
+          </div>
+          <div class="mt-3 flex items-center gap-3">
+            <BaseButton size="sm" variant="primary" :loading="ticketBusy" :disabled="!ticketGid.trim() || !ticketInput.trim()" @click="saveTicket">保存票据</BaseButton>
+            <span v-if="ticketNote" role="status" class="text-xs text-gray-500">{{ ticketNote }}</span>
+          </div>
+          <div v-if="ticketEntries.length" class="mt-4 divide-y divide-gray-100 dark:divide-gray-700">
+            <div v-for="entry in ticketEntries" :key="entry.gid" class="flex items-center justify-between gap-3 py-2 text-sm">
+              <span>铺主 {{ entry.gid }}</span>
+              <BaseButton size="sm" variant="secondary" :disabled="ticketBusy" @click="removeTicket(entry.gid)">删除</BaseButton>
+            </div>
+          </div>
+        </div>
         <div class="rounded-xl bg-white p-5 shadow-sm dark:bg-gray-800">
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div>

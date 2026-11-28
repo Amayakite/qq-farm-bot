@@ -24,7 +24,7 @@ test('QQ broker hands the client to the next user after authorization, failure, 
     switch (request.url) {
       case '/webui/auth/login': return data({ Credential: 'test-credential' });
       case '/webui/QQLogin/CheckLoginStatus':
-        return data({ loginPhase: phase, isLogin: ready(), coreReady: ready(),
+        return data({ loginPhase: phase, isLogin: ready(), isOffline: false, coreReady: ready(),
           qrLoginAccepted: phase === 'initializing', qrcodeurl: qrUrl() });
       case '/webui/QQLogin/RefreshQRcode':
         if (!['waiting_qrcode', 'qrcode_scanned'].includes(phase)) return send({ code: -1 });
@@ -73,6 +73,23 @@ test('QQ broker hands the client to the next user after authorization, failure, 
   const status = taskId => post('login/status', { taskId });
   const authorize = taskId => post('miniapp/code', { taskId, appId: '1234567890' });
   const cancel = taskId => post('logout', { taskId });
+
+  phase = 'ready';
+  let releaseOrphan;
+  const orphanStarted = new Promise(resolve => { onLogout = resolve; });
+  holdLogout = new Promise(resolve => { releaseOrphan = resolve; });
+  const recovery = open();
+  try {
+    await Promise.race([orphanStarted, recovery.then(() => assert.fail('Orphan recovery finished before logout'))]);
+    assert.equal((await post('login/qrcode')).code, 'WORKFLOW_BUSY');
+  } finally {
+    releaseOrphan();
+  }
+  const recovered = await recovery;
+  assert.equal(logoutCount, 1);
+  holdLogout = undefined;
+  onLogout = undefined;
+  assert.equal((await cancel(recovered)).ok, true);
 
   for (const finalStatus of ['failed', 'login_required', 'cancelled', 'expired']) {
     for (const pending of [false, true]) {

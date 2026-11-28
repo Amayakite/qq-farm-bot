@@ -133,13 +133,14 @@ function createYishuHuanfuActivityService(deps: any) {
         getAllFriends: getAllFriendsDep,
         // 面板其它账号的好友同样可注入，测试不必读写磁盘存档。
         getPanelFriendGids: getPanelFriendGidsDep,
+        getShopTickets: getShopTicketsDep,
     } = deps;
 
     // 状态槽 130 的 4 号子槽只保留最近一次动作，不能用它判断“今天是否已领”，
     // 因此每日动作按服务器日期在本地记账，服务端报错时再回滚。
     let seedClaimedDateKey = '';
     let sharedDateKey = '';
-    let friendScanCache: { at: number; data: any } | null = null;
+    let friendScanCache: { at: number; data: any; ticketRevision: string } | null = null;
     // 候选池（本账号好友 + 面板其它账号好友）超过单轮上限时的轮换游标。
     let friendScanRotation = 0;
     // 背包读取失败时保留原因，随快照一起下发，前端可以显示“余额未知”的具体理由。
@@ -556,11 +557,26 @@ function createYishuHuanfuActivityService(deps: any) {
      * 查单个铺子的今日行情（cmd 92）。只读，不产生成交，可以拿任意 gid 查，
      * 好友铺子比价就是靠它逐个扫。
      */
-    async function fetchShopQuote(targetGid: string) {
+    function shopTickets(): Record<string, { ticket: string; updatedAt: number }> {
+        if (typeof getShopTicketsDep === 'function') return getShopTicketsDep();
+        const { workerData } = require('node:worker_threads');
+        const store = require('../../models/store');
+        const { readTickets } = require('../../models/yishu-tickets');
+        const id = String(workerData?.accountId || process.env.FARM_ACCOUNT_ID || '');
+        const account = store.getAccountById(id);
+        if (!account) throw businessError('YSHF_ACCOUNT_UNAVAILABLE', '无法确认账号归属');
+        return readTickets(account);
+    }
+
+    async function fetchShopQuote(targetGid: string, tickets = shopTickets()) {
+        const ticket = targetGid === ownGid() ? '' : tickets[targetGid]?.ticket;
         const reply = await operateYshf(types.YshfShopQueryRequest, {
             activity_id: YSHF_ACTIVITY_ID,
             cmd: YSHF_CMD_SHOP_QUERY,
-            params: { shop_gid: targetGid },
+            params: {
+                shop_gid: targetGid,
+                ...(ticket ? { ticket: { activity_id: YSHF_ACTIVITY_ID, shop_gid: targetGid, nonce: ticket } } : {}),
+            },
         });
         const quote = reply?.yshf_shop?.quote;
         const shop = quote?.shop;
@@ -636,7 +652,9 @@ function createYishuHuanfuActivityService(deps: any) {
             : FRIEND_SCAN_DEFAULT_LIMIT;
         const force = options?.force === true;
         const now = Date.now();
-        if (!force && friendScanCache && now - friendScanCache.at < FRIEND_SCAN_TTL_MS) {
+        const tickets = shopTickets();
+        const ticketRevision = JSON.stringify(tickets);
+        if (!force && friendScanCache && friendScanCache.ticketRevision === ticketRevision && now - friendScanCache.at < FRIEND_SCAN_TTL_MS) {
             return { ...friendScanCache.data, cached: true };
         }
 
@@ -666,6 +684,11 @@ function createYishuHuanfuActivityService(deps: any) {
         if (own) {
             targets.push({ gid: own, own: true, name: '我的铺子', avatar: '', level: '0', via: 'own' });
             seen.add(own);
+        }
+        for (const gid of Object.keys(tickets)) {
+            if (seen.has(gid)) continue;
+            seen.add(gid);
+            targets.push({ gid, own: false, name: '', avatar: '', level: '0', via: 'ticket' });
         }
         for (const friend of friends) {
             const gid = int64String(friend?.gid);
@@ -705,7 +728,7 @@ function createYishuHuanfuActivityService(deps: any) {
         let failureMessage = '';
         for (let start = 0; start < slice.length; start += FRIEND_SCAN_CONCURRENCY) {
             const batch = slice.slice(start, start + FRIEND_SCAN_CONCURRENCY);
-            const settled = await Promise.allSettled(batch.map(entry => fetchShopQuote(entry.gid)));
+            const settled = await Promise.allSettled(batch.map(entry => fetchShopQuote(entry.gid, tickets)));
             settled.forEach((result, index) => {
                 const entry = batch[index];
                 if (result.status === 'rejected') {
@@ -764,7 +787,7 @@ function createYishuHuanfuActivityService(deps: any) {
             cached: false,
             scannedAt: now,
         };
-        friendScanCache = { at: now, data };
+        friendScanCache = { at: now, data, ticketRevision };
         return data;
     }
 
